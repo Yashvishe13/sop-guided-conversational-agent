@@ -15,6 +15,9 @@ What is checked, and why:
   - a passed appeal deadline must not be described as open, and the stated status must match;
   - the reply must not say verification is pending, or that an email was sent when it was not;
   - a claim conversation may not end without offering the email summary (POST_PROCESS).
+* Required content: when code decided this reply must offer a human representative (repeated
+  off-topic requests or refusals, someone acting for the policyholder, a verification lockout),
+  the guard checks the reply makes that offer.
 * The guard's review, for every reply that passes the checks above, in every phase: the guard
   model (``agent/guard.py``) checks each claim fact against the record, the claim tool results
   of this turn, and the caller's words (for example "the pathology report is on file" when it is
@@ -80,6 +83,13 @@ _CLAIM_DESC = re.compile(
 _TYPE_ALIASES = {"health": "healthcare", "medical": "healthcare"}
 
 
+# What the application requires a reply to contain when a human offer is due (see TurnEffects.human_offer_due).
+_HUMAN_OFFER_REQUIREMENT = (
+    "Offer to connect the caller with a human claims representative, or tell them one has been asked to follow up "
+    "if application_state shows a human follow-up was requested."
+)
+
+
 class ReplyGuard:
     def __init__(
         self,
@@ -118,6 +128,7 @@ class ReplyGuard:
             record=self._record(state),
             tool_results=effects.tool_results,
             application_state=self._application_state(state, effects),
+            required_in_reply=[_HUMAN_OFFER_REQUIREMENT] if effects.human_offer_due else [],
         )
         if verdict is None:
             return ["reply_unreviewed: the reply could not be reviewed; write it again"]

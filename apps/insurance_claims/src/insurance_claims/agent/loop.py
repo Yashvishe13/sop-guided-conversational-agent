@@ -80,6 +80,7 @@ _SAFE_FALLBACK = {
     Phase.PROCESS_CASE: "I'm sorry, I had trouble pulling that together. Could you ask that again, or would you like me to connect you with a claims representative?",
     Phase.POST_PROCESS: "I'm sorry, I had trouble with that. Would you like the summary emailed to the address on file, or would you prefer to skip it?",
 }
+_HUMAN_OFFER_FALLBACK = "I'm sorry, I can't help with that here. Would you like me to connect you with a human claims representative?"
 _EXPIRED_NOTICE = "For your security, your verification expired after a period of inactivity, so I'll need to confirm your identity again."
 _EXPIRED_BUTTON = "For your security, your verification expired, so I'll need to confirm your identity again before sending anything."
 _BUTTON_UNAVAILABLE = "That option isn't available right now."
@@ -293,13 +294,14 @@ class ClaimsAgent:
             return TurnOutcome(state=state, messages=[msg], stop_reason="turn_limit")
 
         review = self.guard.review_caller(self._transcript(state))
-        self._apply_caller_review(state, review, now)
+        human_offer_due = self._apply_caller_review(state, review, now)
         executor = ToolExecutor(
             state=state, now=now, today=self.today(), caller_text=self._caller_text(state),
             directory=self.directory, claims=self.claims, guidelines=self.guidelines, schema_doc=self.schema_doc,
             followup_rules=self.followup_rules, settings=self.settings, failure_ledger=self.failure_ledger,
             guard=self.guard, caller_review=review,
         )  # fmt: skip
+        executor.effects.human_offer_due.extend(human_offer_due)
         items = self._history_items(state)
         if expired:
             items.append(_developer(_EXPIRED_NOTE_FOR_MODEL))
@@ -312,7 +314,8 @@ class ClaimsAgent:
         with budget:
             reply, stop = self._react(state, items, executor, budget)
         tracing.event("turn_summary", tools=[c["name"] for c in executor.calls], stop_reason=stop, budget=budget.snapshot())
-        return self._finish_turn(state, reply or _SAFE_FALLBACK[state.phase], stop, now, expired, executor)
+        fallback = _HUMAN_OFFER_FALLBACK if executor.effects.human_offer_due else _SAFE_FALLBACK[state.phase]
+        return self._finish_turn(state, reply or fallback, stop, now, expired, executor)
 
     def _react(
         self, state: SessionState, items: list[dict[str, Any]], executor: ToolExecutor, budget: TurnBudget
@@ -328,7 +331,7 @@ class ClaimsAgent:
                 resp = budget.call(
                     self.model,
                     task="agent",
-                    instructions=self._instructions(state, executor.caller_review),
+                    instructions=self._instructions(state, executor.caller_review, executor.effects.human_offer_due),
                     input=items,
                     tools=tool_schemas(state),
                     tool_choice="none" if step == MAX_STEPS - 1 else "auto",
@@ -403,11 +406,12 @@ class ClaimsAgent:
         return TurnOutcome(state=state, messages=messages, stop_reason=stop)
 
     # ------------------------------------------------------------------ what the model sees
-    def _instructions(self, state: SessionState, review: CallerReview | None) -> str:
+    def _instructions(self, state: SessionState, review: CallerReview | None, human_offer_due: list[str]) -> str:
         base = self.prompts.instructions("agent", state.phase.value)
-        return f"{base}\n\n# Session context (from the application, trusted)\n{json.dumps(self._context(state, review), indent=1)}"
+        context = self._context(state, review, human_offer_due)
+        return f"{base}\n\n# Session context (from the application, trusted)\n{json.dumps(context, indent=1)}"
 
-    def _context(self, state: SessionState, review: CallerReview | None) -> dict[str, Any]:
+    def _context(self, state: SessionState, review: CallerReview | None, human_offer_due: list[str]) -> dict[str, Any]:
         """Trusted facts about the session. Claim facts are only included after verification."""
         h = state.hints
         remembered = {"reasons": h.question_summaries[-3:], "case_type": h.case_type, "status": h.status, "month": h.month, "year": h.year}
@@ -434,6 +438,7 @@ class ClaimsAgent:
             },
             "off_topic": {"count": offtopic, "offer_human": offtopic >= self.settings.max_off_topic},
             "handoff": {"offered": state.handoff.offered, "requested": state.handoff.requested},
+            "this_reply_must_offer_a_human": {"required": bool(human_offer_due), "because": human_offer_due},
         }
         if state.verified:
             ctx["caller_first_name"] = self.directory.first_name(state.verification.party_id or "")
@@ -463,14 +468,19 @@ class ClaimsAgent:
         return "\n".join(m.text for m in state.messages_since_reset() if m.role == "user")
 
     # ------------------------------------------------------------------ applying the guard's caller review
-    def _apply_caller_review(self, state: SessionState, review: CallerReview | None, now: datetime) -> None:
-        """Code, not the agent, acts on what the guard found in the caller's messages."""
+    def _apply_caller_review(self, state: SessionState, review: CallerReview | None, now: datetime) -> list[str]:
+        """Code, not the agent, acts on what the guard found in the caller's messages.
+
+        Returns why this turn's reply must offer a human representative (empty if it need not).
+        """
         if review is None:
             tracing.event("guardrail", rule="caller_review_unavailable")
-            return  # fail closed: verify_identity refuses without a confirmed speaker
+            return []  # fail closed: verify_identity refuses without a confirmed speaker
+        due: list[str] = []
         if review.speaker == "acting_for_someone_else":
             state.verification.representative_declared = True  # sticky for the rest of the session
             state.handoff.offered = True
+            due.append("representative_needs_authorization")
             if state.verified:
                 self._withdraw_access(state, now)
         elif review.different_person and state.verified:
@@ -479,10 +489,12 @@ class ClaimsAgent:
             state.counters.refusals += 1
             if state.counters.refusals >= self.settings.max_refusals:
                 state.handoff.offered = True
+                due.append("repeated_refusal")
         if review.off_topic_request:
             state.counters.off_topic_total += 1
             if state.counters.off_topic_total >= self.settings.max_off_topic:
                 state.handoff.offered = True
+                due.append("repeated_off_topic")
         self._remember(state, review)
         tracing.event(
             "guardrail",
@@ -491,7 +503,9 @@ class ClaimsAgent:
             different_person=review.different_person,
             refusals=state.counters.refusals,
             off_topic=state.counters.off_topic_total,
+            human_offer_due=due,
         )
+        return [] if state.handoff.requested else due
 
     def _remember(self, state: SessionState, review: CallerReview) -> None:
         """Keep the claim the caller described (untrusted memory, used only after verification)."""

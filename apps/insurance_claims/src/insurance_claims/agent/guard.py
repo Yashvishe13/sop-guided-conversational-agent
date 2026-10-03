@@ -88,7 +88,12 @@ class SummaryVerdict(_Verdict):
 
 
 ReplyProblemCategory = Literal[
-    "unsupported_fact", "disclosed_before_verification", "promise_or_invented_action", "out_of_scope", "internal_details"
+    "unsupported_fact",
+    "disclosed_before_verification",
+    "promise_or_invented_action",
+    "out_of_scope",
+    "internal_details",
+    "missing_required",
 ]
 DOC_STATUSES = ("has_it", "can_request", "cannot_obtain", "already_sent", "unknown")
 
@@ -164,6 +169,7 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                                 "promise_or_invented_action",
                                 "out_of_scope",
                                 "internal_details",
+                                "missing_required",
                             ],
                         },
                         "detail": {"type": "string"},
@@ -227,6 +233,7 @@ class Guard:
         record: dict[str, Any] | None,
         tool_results: list[dict[str, Any]],
         application_state: dict[str, Any],
+        required_in_reply: list[str] | None = None,
     ) -> ReplyVerdict | None:
         """``record`` is None before verification (nothing about any claim may be said then)."""
         payload = {
@@ -236,6 +243,7 @@ class Guard:
             "application_state": application_state,
             "record": record,
             "tool_results": tool_results,
+            "required_in_reply": required_in_reply or [],
         }
         return self._ask("guard_reply", payload, ReplyVerdict)
 

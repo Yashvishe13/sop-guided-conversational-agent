@@ -117,13 +117,20 @@ notices), which contain no model output.
 | `judge_consent` | `record_email_decision` | `decision` (send / skip / unclear) | the agent's decision is recorded only if it matches |
 | `judge_summary` | `offer_email_summary` | `supported`, `problems` | an unsupported or incomplete summary is rejected with the problems |
 | `judge_document` | `record_document_status` | `status` the caller's words indicate | the status is stored only if it matches the agent's |
-| `judge_reply` | every draft reply, every phase, after the code checks | `allowed`, `problems` with a category: `unsupported_fact`, `disclosed_before_verification`, `promise_or_invented_action`, `out_of_scope`, `internal_details` | any problem blocks the reply and is sent back to the agent to fix |
+| `judge_reply` | every draft reply, every phase, after the code checks | `allowed`, `problems` with a category: `unsupported_fact`, `disclosed_before_verification`, `promise_or_invented_action`, `out_of_scope`, `internal_details`, `missing_required` | any problem blocks the reply and is sent back to the agent to fix |
 
 The reply review gets the recent transcript, whether the caller is verified, the record (nothing
 before verification; afterwards the claims on the account, the selected claim's full record with
 what the caller said about each document), and the results of the claim tools the agent called
 this turn. It checks every claim statement against them, so "the pathology report is complete and
 on file" is blocked when the record lists it as required.
+
+**Required content.** Some turns oblige the reply to say something. Code decides when a reply must
+offer a human representative: the turn the off-topic or refusal limit is reached, when the caller
+turns out to act for someone else, and when verification locks (`TurnEffects.human_offer_due`).
+The agent is told in its context, the guard checks the reply makes the offer (`missing_required`),
+and if no compliant reply is produced, the fallback reply makes the offer itself. Once a human
+follow-up has been requested, no further offer is required.
 
 * **Independent.** The guard has its own transport (`Runtime.guard_model`) and its own prompts, used
   alone (without the agent's prompts). It sees only what it judges, as one JSON document: the

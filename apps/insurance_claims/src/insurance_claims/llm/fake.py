@@ -240,4 +240,6 @@ def _guard_verdict(task: str, payload: dict[str, Any]) -> dict[str, Any]:
     outstanding = [d for d, st in (selected.get("document_status") or {}).items() if st != "already_sent"]
     if outstanding and (bad := _ON_FILE.search(reply)):
         problems.append({"category": "unsupported_fact", "detail": f"says '{bad.group(0)}' but documents are still required"})
+    if payload.get("required_in_reply") and not re.search(r"\b(?:human|representative|person)\b", reply, re.IGNORECASE):
+        problems.append({"category": "missing_required", "detail": "does not offer a human representative"})
     return {"allowed": not problems, "problems": problems}

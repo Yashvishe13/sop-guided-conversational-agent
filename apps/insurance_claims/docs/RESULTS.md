@@ -1,6 +1,6 @@
 # Verification results
 
-Date: 2026-10-04. Version 0.3.0. Model: `gpt-5.6-luna` (Responses API) as both agent and guard. Prompt set `2026-10-04.guard-7`.
+Date: 2026-10-04. Version 0.3.0. Model: `gpt-5.6-luna` (Responses API) as both agent and guard. Prompt set `2026-10-04.guard-8`.
 
 This report covers the sample conversation from `instructions.md`, the safety rules in `plan.md`,
 and how each was verified on the current ReAct agent (see `docs/DESIGN.md`).
@@ -9,7 +9,7 @@ and how each was verified on the current ReAct agent (see `docs/DESIGN.md`).
 
 | Check | How | Result |
 | --- | --- | --- |
-| Unit, chaos, API, privacy suite | `pytest` with the offline fake model and scripted misbehaving models, no network | **1,735 passed** (incl. the external review's reproductions, the agent and the guard under fault injection, and an import check of every module) |
+| Unit, chaos, API, privacy suite | `pytest` with the offline fake model and scripted misbehaving models, no network | **1,741 passed** (incl. the external review's reproductions, the agent and the guard under fault injection, and an import check of every module) |
 | Browser smoke and recovery | Playwright against the real app (`pytest -m browser`) | **9 passed** |
 | Live model evaluation | Scripted multi-turn runs against `gpt-5.6-luna` as agent and guard (`evals/live_eval.py --seeds 3`) | **24 / 24 passed**; 106 guard verdicts (49 reply reviews), none missing, no legitimate reply blocked |
 | Docker | `docker compose up -d --build`, `/health`, full conversation over HTTP with the real model, trace reader | Pass |
@@ -87,6 +87,14 @@ The same audit found the agent hedging ("the record does not confirm whether it 
 repeating an internal label; the tool output now states that listed documents have not been
 received, and the deployed app answers "has not been received ... even though your doctor says it
 was sent".
+
+### Third review: a due human offer must reach the caller
+
+After three off-topic questions the state recorded that a human should be offered, but a scripted
+agent's reply only asked for identity details again. Code now marks a reply as required to offer a
+human when the off-topic or refusal limit is reached, when the caller acts for someone else, and
+when verification locks; the guard checks the reply makes the offer, and the fallback reply makes
+it when the agent will not. Tests reproduce the review's three-turn script and cover each trigger.
 
 Every guard failure (error, timeout, refusal, invalid or truncated verdict) is treated as "not
 allowed"; `test_guard.py` covers each failure kind and the chaos suite runs 30 seeds with faults

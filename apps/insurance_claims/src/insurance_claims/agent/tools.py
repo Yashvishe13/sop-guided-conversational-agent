@@ -283,6 +283,8 @@ class TurnEffects:
     tools_called: set[str] = field(default_factory=set)
     caller_review: CallerReview | None = None
     """This turn's guard review of the caller (also used by the reply checks)."""
+    human_offer_due: list[str] = field(default_factory=list)
+    """Why this reply must offer a human representative (empty when it need not). Checked by the guard."""
     """Successful tool outputs this turn (lookups and actions taken): the evidence the guard checks the reply against."""
 
 
@@ -392,6 +394,11 @@ class ToolExecutor:
         self.state.phase = to
 
     # ------------------------------------------------------------------ handoff
+    def _require_human_offer(self, reason: str) -> None:
+        """This turn's reply must offer a human representative (unless one was already requested)."""
+        if not self.state.handoff.requested and reason not in self.effects.human_offer_due:
+            self.effects.human_offer_due.append(reason)
+
     def _request_human(self, a: dict[str, Any]) -> ToolResult:
         if a.get("reason") == "repeated_refusal" and self.state.counters.refusals < self.settings.max_refusals:
             tracing.event("guardrail", rule="premature_handoff", refusals=self.state.counters.refusals)
@@ -422,6 +429,7 @@ class ToolExecutor:
         v = self.state.verification
         if v.representative_declared:
             self.state.handoff.offered = True
+            self._require_human_offer("representative_needs_authorization")
             tracing.event("guardrail", rule="representative_not_authorized")
             return ToolResult(
                 "verify_identity",
@@ -432,6 +440,7 @@ class ToolExecutor:
                 },
             )
         if v.status == "locked":
+            self._require_human_offer("verification_locked")
             return ToolResult(
                 "verify_identity",
                 False,
@@ -510,6 +519,7 @@ class ToolExecutor:
             )
         if vstate.status == "locked":
             self.state.handoff.offered = True
+            self._require_human_offer("verification_locked")
             return ToolResult(
                 "verify_identity",
                 False,

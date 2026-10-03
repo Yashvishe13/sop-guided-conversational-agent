@@ -523,3 +523,69 @@ def test_two_details_may_be_followed_by_a_request_for_a_third(harness):
     h = harness(model=model, guard_model=GuardStub())
     payload = h.say("My name is Margaret Chen, DOB 1985-03-15.")
     assert h.last_reply(payload) == "Thanks. Could you also give me the last four digits of your SSN?"
+
+
+# ---------------------------------------------------------------------- third review: a due human offer must reach the caller
+
+ASK_DETAILS = "I can only help with insurance claims. Could you share your full name and date of birth?"
+OFFER = "I can only help with insurance claims here. Would you like me to connect you with a human claims representative?"
+
+
+def test_third_off_topic_question_reply_must_offer_a_human(harness, settings):
+    # The external review's script: the agent keeps asking for details and never offers a human.
+    model = Scripted(*[say(ASK_DETAILS)] * settings.max_off_topic, say(OFFER))
+    h = harness(model=model, guard_model=GuardStub())
+    replies = [h.last_reply(h.say(q)) for q in ("What is RL?", "Who won the world cup?", "What is RL, seriously?")]
+    assert replies[:-1] == [ASK_DETAILS] * (settings.max_off_topic - 1)  # no offer needed yet
+    assert replies[-1] == OFFER and h.state.counters.off_topic_total == settings.max_off_topic
+    feedback = [i for i in model.requests[-1]["input"] if i.get("role") == "developer"]
+    assert "missing_required" in feedback[-1]["content"]
+
+
+def test_agent_that_never_offers_gets_the_fallback_that_does(harness, settings):
+    model = Scripted(*[say(ASK_DETAILS)] * 10)
+    h = harness(model=model, guard_model=GuardStub())
+    for q in ("What is RL?", "Who won the world cup?", "What is RL, seriously?"):
+        payload = h.say(q)
+    assert "human claims representative" in h.last_reply(payload)
+
+
+@pytest.mark.parametrize(
+    ("messages", "guard"),
+    [
+        (["I already told you who I am.", "No. I'm not giving you anything."], {}),
+        (["I'm calling for my mother Margaret Chen, 1985-03-15, SSN 4472."], {}),
+    ],
+    ids=["repeated_refusal", "acting_for_someone_else"],
+)
+def test_other_human_offer_triggers_are_enforced_too(harness, messages, guard):
+    model = Scripted(*[say("I understand. Verification protects your private claim information.")] * 10)
+    h = harness(model=model, guard_model=GuardStub(**guard))
+    for m in messages:
+        payload = h.say(m)
+    assert "human claims representative" in h.last_reply(payload)
+
+
+def test_lockout_reply_must_offer_a_human(harness, settings):
+    wrong = {**IDENTITY, "dob": "1985-03-16"}
+    model = Scripted()
+    h = harness(model=model, guard_model=GuardStub())
+    for i in range(settings.max_verification_failures):
+        dob = f"1985-03-{16 + i}"
+        model.responses += [
+            call("verify_identity", **{**wrong, "dob": dob}),
+            say("Those details didn't match. Could you double check them?"),
+        ]
+        payload = h.say(f"My name is Margaret Chen, DOB {dob}, SSN last four 4472.")
+    assert h.state.verification.status == "locked"
+    assert "human claims representative" in h.last_reply(payload)
+
+
+def test_no_offer_is_required_once_a_human_was_requested(harness):
+    model = Scripted(call("request_human", reason="caller_asked"), say("A claims representative will follow up with you."))
+    h = harness(model=model, guard_model=GuardStub())
+    h.say("I want a human.")
+    model.responses += [say(ASK_DETAILS)] * 3
+    for q in ("What is RL?", "Who won the world cup?", "What is RL, seriously?"):
+        payload = h.say(q)
+    assert h.last_reply(payload) == ASK_DETAILS
