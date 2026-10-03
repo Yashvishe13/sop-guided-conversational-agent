@@ -1,6 +1,6 @@
 # Verification results
 
-Date: 2026-10-03. Version 0.2.0. Model: `gpt-5.6-luna` (Responses API). Prompt set `2026-10-03.agent-4`.
+Date: 2026-10-04. Version 0.3.0. Model: `gpt-5.6-luna` (Responses API) as both agent and guard. Prompt set `2026-10-04.guard-2`.
 
 This report covers the sample conversation from `instructions.md`, the safety rules in `plan.md`,
 and how each was verified on the current ReAct agent (see `docs/DESIGN.md`).
@@ -9,9 +9,9 @@ and how each was verified on the current ReAct agent (see `docs/DESIGN.md`).
 
 | Check | How | Result |
 | --- | --- | --- |
-| Unit, chaos, API, privacy suite | `pytest` with the offline fake model and scripted misbehaving models, no network | **1,630 passed** (incl. the agent under fault injection and an import check of every module) |
+| Unit, chaos, API, privacy suite | `pytest` with the offline fake model and scripted misbehaving models, no network | **1,717 passed** (incl. the external review's reproductions, the agent and the guard under fault injection, and an import check of every module) |
 | Browser smoke and recovery | Playwright against the real app (`pytest -m browser`) | **9 passed** |
-| Live model evaluation | Scripted multi-turn runs against `gpt-5.6-luna` (`evals/live_eval.py`) | **15 / 15 passed** |
+| Live model evaluation | Scripted multi-turn runs against `gpt-5.6-luna` as agent and guard (`evals/live_eval.py --seeds 3`) | **23 / 23 passed**; 100 guard verdicts, none missing, no legitimate reply blocked |
 | Docker | `docker compose up -d --build`, `/health`, full conversation over HTTP with the real model, trace reader | Pass |
 | Chrome walkthrough | Claude in Chrome against the Docker app with the real model | Pass |
 
@@ -24,13 +24,14 @@ Caller, first message:
 What happens in that one turn (from the redacted trace):
 
 ```
-llm                 model calls note_caller_context(denied, healthcare, January) and verify_identity(...)
-tool.verify_identity  values grounded in the caller's text; 3 PII fields (policy number not counted); matched P9
+guard.caller        speaker account_holder; claim mentioned: denied healthcare, January (remembered by code)
+llm                 agent calls verify_identity(...)
+tool.verify_identity  speaker confirmed; values grounded in the caller's text; 3 PII fields (policy number not counted); matched P9
 phase_transition    VERIFY_ID -> RESOLVE_INTENT (identity_verified); claim tools now on the menu
 tool.list_my_claims / tool.select_claim   CL-2048 chosen from the remembered hint (CL-2011 is closed)
 phase_transition    RESOLVE_INTENT -> PROCESS_CASE (claim_selected)
 tool.get_claim_details  facts for the reply
-reply guard         style, grounding, status, deadline checks pass
+reply guard         style, grounding, status, deadline checks pass; guard.reply allows it
 ```
 
 Reply (Chrome, after the cleanup):
@@ -42,6 +43,31 @@ card (claim ID, status, passed deadline, both documents), the masked on-file add
 buttons. Send email reported the honest outbox result ("saved to the local demo outbox... nothing
 was sent to your inbox").
 
+## The guard (response to the external review)
+
+An external review graded the agent 6/10: rules described as firm still depended on the agent
+choosing the right tool or argument. Each finding was reproduced as a failing test with a scripted
+agent and then fixed by an independent guard model that code consults at fixed checkpoints
+(`agent/guard.py`, prompts `[tasks.guard_*]`; design in `docs/DESIGN.md` section 5).
+
+| Review finding | Before | Now | Tests |
+| --- | --- | --- | --- |
+| A caller acting for their mother was verified with her details | Trusted the agent's `caller_is_policyholder` argument | The guard reviews every caller message; verification runs only when it says the person typing is the account holder; acting for someone else is sticky; a hand-over after verification withdraws access | `test_guard.py` (4), live `third_party_natural` (3 phrasings without keywords), `unclear_speaker_then_confirmed`, `handover_after_verification` |
+| "What documents do I still need?" recorded as consent to send | Only the offer and turn number were checked | `record_email_decision` needs the guard to read the same choice in the caller's own words | `test_guard.py` (3), live `question_is_not_consent` |
+| A false summary ("already submitted, no action needed") was offered | Only claim ID, status, document words, length, style | Code grounding checks on the summary, then the guard fact checks every statement against the record, recorded document status, guidance, and the caller's words | `test_guard.py` (3) |
+| An explanation of reinforcement learning was sent | No scope check on replies | The guard's scope check on every draft; off-topic requests counted by code from the caller review | `test_guard.py` (2), live `off_topic_loop` |
+| Memory and refusal counting depended on the agent calling a tool | `note_caller_context`, `note_refusal`, `flag_off_topic` tools | Code records them from the guard's caller review; those tools were removed | `test_guard.py` (2), live `split_verification_and_email`, `emotional_refusal` |
+
+Found while testing in Chrome: a caller who asked a question while the email offer was open
+had to be offered the summary a second time, because any claim question withdrew the offer. Now
+questions about the same claim keep the offer open (switching to another claim still withdraws
+it), so "what documents do I still need?" followed by "yes, please email it" sends once, after
+the guard confirms the yes.
+
+Every guard failure (error, timeout, refusal, invalid or truncated verdict) is treated as "not
+allowed"; `test_guard.py` covers each failure kind and the chaos suite runs 30 seeds with faults
+injected into the guard as well as the agent.
+
 ## Safety rules and where they are enforced
 
 | Requirement | Enforced by | Tests |
@@ -50,13 +76,13 @@ was sent to your inbox").
 | Model cannot invent identity values or set verified/phase/consent | Values must appear in the caller's messages; state changes only inside tools | `tests/agent/test_agent.py` (scripted misbehaving model) |
 | No claim data before verification | Claim tools absent before verification; reply leak check over every claim in the dataset | `tests/agent/test_agent.py`, `tests/agent/test_agent_chaos.py` |
 | Brute force across sessions | Per-policyholder failure ledger, fails closed | `tests/persistence/test_store.py`, `tests/agent/test_agent.py` |
-| Representative is not the policyholder | Sticky `representative_declared`; `verify_identity` returns not_allowed | `tests/agent/test_agent.py` |
-| Early hints remembered and reused | `note_caller_context` in any phase; returned on verification | `tests/agent/test_agent.py`, live `hint_reuse` |
+| Only the policyholder is verified | The guard's caller review gates `verify_identity`; sticky `representative_declared`; hand-over withdraws access | `tests/agent/test_guard.py`, live `third_party_natural` |
+| Early hints remembered and reused | Code stores the claim the guard found in the caller's words, in any phase | `tests/agent/test_guard.py`, live `hint_reuse` |
 | Answers only from the caller's claim and guidelines | Party-scoped tools; reply grounding (IDs, amounts, dates, status, claim descriptions, deadline wording, promises) | `tests/agent/test_guardrails.py`, `tests/agent/test_agent.py` |
-| Off-topic declined, human after repeats; persuasion before handoff | `flag_off_topic`, `note_refusal`, `request_human` gate | `tests/agent/test_agent.py`, live `off_topic_loop` |
+| Off-topic declined, human after repeats; persuasion before handoff | Guard caller review counts off-topic requests and refusals; guard scope check on replies; `request_human` gate | `tests/agent/test_guard.py`, live `off_topic_loop`, `emotional_refusal` |
 | No em dash or colon | `check_style` on replies and on the email summary | `tests/agent/test_guardrails.py`, `tests/agent/test_agent_chaos.py` |
 | No internal vocabulary (phase names, party IDs, prompt words) | `check_internal_reference` in `ReplyGuard` | `tests/agent/test_agent.py`, `tests/agent/test_guardrails.py` |
-| Explicit consent, on-record recipient, at most one send, truthful status | Offer then a later explicit choice; op key persisted before dispatch; ledger reconciliation | `tests/mail/test_sender.py`, `tests/web/test_email_recovery.py` |
+| Explicit consent, on-record recipient, at most one send, truthful status | Offer then a later explicit choice confirmed by the guard (or the Send button); op key persisted before dispatch; ledger reconciliation | `tests/mail/test_sender.py`, `tests/web/test_email_recovery.py` |
 | Durable memory, concurrency, migrations | Encrypted SQLite checkpoints, optimistic versions, turn idempotency, schema migrations (v1 -> v3) | `tests/persistence/test_store.py`, `tests/web/test_service.py`, `tests/web/test_api.py` |
 | Traces without PII or secrets | Redaction before serialization; LLM spans keep metadata and tokens only | `tests/observability/` |
 | Malformed tool arguments, unknown tools, wrong call IDs, injected text, timeouts | Call-ID pairing check, tool menu re-check, argument validation, reply guard, budgets, retries, safe fallback | `tests/agent/test_agent_chaos.py` (30 seeds), `tests/llm/test_chaos.py` |

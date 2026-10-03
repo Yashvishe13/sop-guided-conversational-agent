@@ -1,8 +1,9 @@
 """Deterministic offline stand-in for the model (``MODEL_PROVIDER=fake``) and for tests.
 
 It behaves like a simple tool-using agent so the real ReAct loop, tool executor, and
-guardrails run end to end without network access. It is deliberately simple; the
-production understanding comes from the real model.
+guardrails run end to end without network access, and it answers the guard's checkpoints
+(tasks ``guard_*``) with keyword heuristics. It is deliberately simple; in production both
+the agent and the guard are the real model.
 """
 
 from __future__ import annotations
@@ -23,6 +24,13 @@ _DONE = re.compile(r"\b(that'?s all|nothing else|i'?m done|no,? thanks)\b", re.I
 _OFF_TOPIC = re.compile(r"\bwhat is rl\b|\bweather\b|\bpython\b|\bworld cup\b", re.IGNORECASE)
 _HUMAN = re.compile(r"\b(human|representative|real person|supervisor)\b", re.IGNORECASE)
 _TYPES = {"healthcare": ("health", "medical"), "auto": ("auto", "car"), "dental": ("dental",)}
+_RELATIVE = r"(?:mother|father|mom|dad|wife|husband|son|daughter|sister|brother|client)"
+_FOR_SOMEONE = re.compile(rf"\b(?:for|behalf of) my {_RELATIVE}\b|\bmy {_RELATIVE}'?s (?:claim|policy|account)\b", re.IGNORECASE)
+_REFUSAL = re.compile(r"already told you|not giving|won'?t give|why do i (?:have|need) to|just tell me", re.IGNORECASE)
+_YES = re.compile(r"\b(?:yes|yeah|sure|send it|go ahead|please do)\b", re.IGNORECASE)
+_NO = re.compile(r"\b(?:no|nope|skip|don'?t)\b", re.IGNORECASE)
+_UNSUPPORTED = re.compile(r"already (?:submitted|sent|received)|no (?:further )?action (?:is )?needed|will be approved", re.IGNORECASE)
+_OUT_OF_SCOPE = re.compile(r"reinforcement learning|machine learning|\bdef \w+\(|world cup", re.IGNORECASE)
 
 
 def _msg(text: str) -> LLMResponse:
@@ -50,6 +58,8 @@ class OfflineFakeModel:
         self.calls.append(task)
         with tracing.span("fake.responses.create", type="llm") as node:
             node["tokens"] = {"input": 10, "output": 10, "total": 20}
+            if str(task).startswith("guard_"):
+                return _json(_guard_verdict(str(task), json.loads(input[0]["content"])))
             return self._decide(instructions, input, {t["name"] for t in tools or []}, tool_choice)
 
     # ------------------------------------------------------------------
@@ -80,30 +90,24 @@ class OfflineFakeModel:
         if tool_choice == "none" or guard:
             return _msg("Thanks for your patience. How else can I help with your claim?")
 
-        if ctx.get("verified") and "report_caller_change" in tools and "report_caller_change" not in done:
-            m = _NAME.search(last)
-            if m and ctx.get("caller_first_name") and not m.group(1).startswith(ctx["caller_first_name"]):
-                return self._call("report_caller_change", {"acting_for_someone_else": False})
-        if "report_caller_change" in done:
-            return _msg("I'll need to verify who I'm speaking with now before we continue.")
         if _HUMAN.search(last) and "request_human" in tools and "request_human" not in done:
             return self._call("request_human", {"reason": "caller_asked"})
         if "request_human" in done:
             return _msg("I've flagged this for a human claims representative to follow up with you.")
-        if _OFF_TOPIC.search(last) and "flag_off_topic" not in done:
-            return self._call("flag_off_topic", {})
-        if "flag_off_topic" in done:
-            extra = " I can also connect you with a human representative." if done["flag_off_topic"].get("offer_human") else ""
+        review = ctx.get("caller_review") if isinstance(ctx.get("caller_review"), dict) else {}
+        if review.get("off_topic_request"):
+            extra = " I can also connect you with a human representative." if ctx.get("off_topic", {}).get("offer_human") else ""
             return _msg("I can only help with insurance claim questions here." + extra)
-
-        hint = {t: True for t, words in _TYPES.items() if any(w in last.lower() for w in words)}
-        if "note_caller_context" not in done and ("claim" in last.lower()) and not ctx.get("verified"):
-            ctype = next(iter(hint), None)
-            status = "denied" if "denied" in last.lower() else None
-            month = 1 if "january" in last.lower() else None
-            return self._call(
-                "note_caller_context",
-                {"reason": "question about a claim", "case_type": ctype, "status": status, "month": month, "year": None},
+        if review.get("speaker") == "acting_for_someone_else" and not ctx.get("verified"):
+            return _msg(
+                "I can only discuss claim details with the policyholder. I can connect you with a representative who can review authorization."
+            )
+        if review.get("refused_verification") and not ctx.get("verified"):
+            if ctx.get("verification", {}).get("stop_persuading"):
+                return _msg("I understand, and I won't ask again. Would you like me to connect you with a human representative?")
+            return _msg(
+                "I understand this is frustrating. Verification protects your private claim information. "
+                "Any three details work, such as your full name, date of birth, phone or email on file, or the last four digits of your SSN."
             )
 
         if "verify_identity" in tools:
@@ -117,12 +121,8 @@ class OfflineFakeModel:
                     "email": (m.group(0) if (m := _EMAIL.search(text)) else None),
                     "id_last4": (m.group(1) if (m := _LAST4.search(text)) else None),
                     "policy_number": None,
-                    "caller_is_policyholder": not re.search(r"\b(?:for|behalf of) my (?:mother|father|mom|dad)\b", text, re.IGNORECASE),
                 }
-                if (
-                    sum(1 for k in ("full_name", "dob", "phone", "email", "id_last4") if args[k]) >= 3
-                    or args["caller_is_policyholder"] is False
-                ):
+                if sum(1 for k in ("full_name", "dob", "phone", "email", "id_last4") if args[k]) >= 3:
                     return self._call("verify_identity", args)
                 return _msg(
                     "To protect your privacy, could you share three details such as your full name, date of birth, phone or email on file, or the last four digits of your SSN?"
@@ -178,3 +178,42 @@ class OfflineFakeModel:
                     text += " Do you have the " + " and the ".join(case["documents_needed"]) + "?"
                 return _msg(text)
         return _msg("How can I help with your claim today?")
+
+
+def _json(data: dict[str, Any]) -> LLMResponse:
+    text = json.dumps(data)
+    item = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}
+    return LLMResponse(status="completed", text=text, raw_output_items=[item], usage=LLMUsage(10, 10, 20))
+
+
+def _guard_verdict(task: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Keyword stand-in for the guard model (offline demo and tests only)."""
+    if task == "guard_caller":
+        callers = [e["text"] for e in payload["transcript"] if e["speaker"] == "caller"]
+        everything, last = " ".join(callers), (callers[-1] if callers else "")
+        low = everything.lower()
+        case_type = next((t for t, words in _TYPES.items() if any(w in low for w in words)), None)
+        names = [m.group(1) for c in callers if (m := _NAME.search(c))]
+        return {
+            "speaker": "acting_for_someone_else" if _FOR_SOMEONE.search(everything) else "account_holder",
+            "different_person": len(names) >= 2 and _NAME.search(last) is not None and names[-1] != names[0],
+            "refused_verification": bool(_REFUSAL.search(last)),
+            "off_topic_request": bool(_OFF_TOPIC.search(last)),
+            "claim_mentioned": {
+                "case_type": case_type,
+                "status": "denied" if "denied" in low else None,
+                "month": 1 if "january" in low else None,
+                "year": None,
+            },
+            "reason": "question about a claim" if "claim" in low else None,
+            "rationale": "keyword heuristic",
+        }
+    if task == "guard_consent":
+        last = (payload["caller_replies"] or [""])[-1]
+        decision = "unclear" if "?" in last else "skip" if _NO.search(last) else "send" if _YES.search(last) else "unclear"
+        return {"decision": decision, "rationale": "keyword heuristic"}
+    if task == "guard_summary":
+        bad = _UNSUPPORTED.search(payload["summary"])
+        return {"supported": not bad, "problems": [f"unsupported statement: {bad.group(0)}"] if bad else []}
+    bad = _OUT_OF_SCOPE.search(payload["reply"])
+    return {"allowed": not bad, "problems": [f"out of scope: {bad.group(0)}"] if bad else []}

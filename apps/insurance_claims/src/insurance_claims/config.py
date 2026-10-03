@@ -124,9 +124,12 @@ class Settings:
     model_max_retries: int = 2
     model_backoff_base_s: float = 0.5
     max_output_tokens_reply: int = 1500
+    reasoning_effort_guard: str = "medium"
+    """Reasoning effort for the guard model's verdicts (OPENAI_REASONING_EFFORT_GUARD)."""
+    max_output_tokens_guard: int = 2000
 
     # --- per-turn budgets -------------------------------------------------
-    turn_deadline_s: float = 75.0
+    turn_deadline_s: float = 150.0
     max_tool_calls_per_turn: int = 6
     """Tool calls per turn; the agent adds a small allowance for verification and lookups."""
 
@@ -224,9 +227,10 @@ class Settings:
             openai_model=(get("OPENAI_MODEL") or "gpt-5.6-luna").strip(),
             model_provider=provider,  # type: ignore[arg-type]
             reasoning_effort_reply=(get("OPENAI_REASONING_EFFORT_REPLY") or "low").strip(),
+            reasoning_effort_guard=(get("OPENAI_REASONING_EFFORT_GUARD") or "medium").strip(),
             model_timeout_s=_float(get("OPENAI_TIMEOUT_S"), 25.0, minimum=1.0),
             model_max_retries=_int(get("OPENAI_MAX_RETRIES"), 2),
-            turn_deadline_s=_float(get("TURN_DEADLINE_S"), 75.0, minimum=5.0),
+            turn_deadline_s=_float(get("TURN_DEADLINE_S"), 150.0, minimum=5.0),
             max_tool_calls_per_turn=_int(get("MAX_TOOL_CALLS_PER_TURN"), 6, minimum=0),
             max_off_topic=_int(get("MAX_OFF_TOPIC"), 3, minimum=1),
             max_refusals=_int(get("MAX_REFUSALS"), 2, minimum=1),

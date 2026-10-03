@@ -3,7 +3,8 @@
 Package map (read in this order):
 
 * ``agent``          The ReAct agent: the tool loop (``loop``), the tools and their code guardrails
-                     (``tools``), reply checks (``reply_guard`` on top of ``guardrails``), per-turn budgets, and the prompt loader.
+                     (``tools``), the independent guard model (``guard``), reply checks (``reply_guard`` on
+                     top of ``guardrails``), per-turn budgets, and the prompt loader.
 * ``claims``         Trusted claim data: fixture loading, party-scoped repositories, identity
                      normalization and matching (``verification``), and the evidence packets replies are checked against.
 * ``domain``         Shared vocabulary, the persisted ``SessionState``, and ledger records.
@@ -15,4 +16,4 @@ Package map (read in this order):
 * ``config``         All server-side settings, read from the environment or ``.env``.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

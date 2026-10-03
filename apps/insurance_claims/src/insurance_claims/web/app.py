@@ -132,6 +132,7 @@ class Runtime:
         settings: Settings,
         *,
         model: ModelTransport | None = None,
+        guard_model: ModelTransport | None = None,
         email_transport: EmailTransport | None = None,
         clock: Any = None,
     ) -> None:
@@ -155,12 +156,15 @@ class Runtime:
         self.store = SessionStore(settings.db_path, cipher, clock=self.clock)
         self.store.init_schema()
         self.model = model or build_model(settings)
+        # The guard always has its own transport, so it never shares state with the agent's model.
+        self.guard_model = guard_model or build_model(settings)
         self.email_transport = email_transport or build_email_transport(settings)
         self.agent = ClaimsAgent(
             settings=settings,
             fixtures=self.fixtures,
             prompts=self.prompts,
             model=self.model,
+            guard_model=self.guard_model,
             clock=self.clock,
             failure_ledger=self.store,
         )

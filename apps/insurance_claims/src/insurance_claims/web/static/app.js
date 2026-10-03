@@ -14,7 +14,7 @@
   var MAX_CHARS = 2000;
   var COUNTER_FROM = 1700;
   var NEAR_LIMIT = 100;
-  var REQUEST_TIMEOUT_MS = 120000;
+  var REQUEST_TIMEOUT_MS = 180000;
   var SESSION_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
   var PHASES = ["VERIFY_ID", "RESOLVE_INTENT", "PROCESS_CASE", "POST_PROCESS"];
   var STEP_STATUS_TEXT = { done: "completed", active: "current step", pending: "not started" };

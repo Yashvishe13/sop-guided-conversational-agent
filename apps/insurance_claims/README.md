@@ -7,7 +7,9 @@ runs a ReAct loop: it reasons about the conversation and calls tools such as
 `verify_identity`, `select_claim`, and `get_claim_details`. Code enforces what
 must never bend: tools only change state when their guardrails pass (three
 matching identity fields the caller actually said, the caller's own claims only,
-explicit email consent), and every reply is checked before it is sent.
+explicit email consent), and every reply is checked before it is sent. Where a rule depends on
+understanding language (who is speaking, what the caller agreed to, whether a summary is true,
+whether a reply is on topic), code asks an independent guard model and refuses unless it allows.
 
 * FastAPI backend with a same-origin HTML/CSS/JavaScript chat UI
 * ReAct agent (Responses API tool loop) whose tool menu changes by phase
@@ -114,8 +116,9 @@ Set `APP_TODAY=2026-10-03` to freeze the date used for deadline statements.
 | `OPENAI_MODEL` | `gpt-5.6-luna` | Model for extraction and drafting |
 | `MODEL_PROVIDER` | `openai` | `fake` for the offline deterministic model |
 | `OPENAI_REASONING_EFFORT_REPLY` | `low` | Reasoning effort for each agent step |
+| `OPENAI_REASONING_EFFORT_GUARD` | `medium` | Reasoning effort for the guard's verdicts |
 | `OPENAI_TIMEOUT_S`, `OPENAI_MAX_RETRIES` | `25`, `2` | Per-call timeout and transient-error retries |
-| `TURN_DEADLINE_S` | `75` | Wall-clock budget for one turn |
+| `TURN_DEADLINE_S` | `150` | Wall-clock budget for one turn (agent and guard calls) |
 | `MAX_TOOL_CALLS_PER_TURN` | `6` | Tool-call budget per turn (model steps are capped at 8 plus 2 guardrail retries in code) |
 | `MAX_OFF_TOPIC` | `3` | Off-topic requests before a human is offered |
 | `MAX_REFUSALS` | `2` | Verification refusals before the agent stops persuading |
@@ -171,7 +174,7 @@ serialization, and raw prompts and model outputs are never stored.
 ```
 compose.yaml                      (repository root) Docker Compose service and volume
 apps/insurance_claims/
-  prompts.toml                    versioned agent instructions, one section per phase
+  prompts.toml                    versioned prompts: the agent (one section per phase) and the guard checkpoints
   fixtures/                       demo policyholders, claims, guidelines, claim schema
   Dockerfile
   docs/DESIGN.md                  architecture and module contracts
@@ -181,7 +184,8 @@ apps/insurance_claims/
     __main__.py                   `python -m insurance_claims` starts uvicorn
     config.py                     Settings, read from the environment and .env
     agent/                        the ReAct agent
-      loop.py                       ClaimsAgent: one turn = model -> tools -> model ... -> checked reply
+      loop.py                       ClaimsAgent: one turn = guard reviews caller, then model -> tools -> ... -> checked reply
+      guard.py                      Guard: independent model reviewer (speaker, consent, summary facts, reply scope)
       tools.py                      tool schemas, per-phase tool menu, ToolExecutor (tool guardrails)
       reply_guard.py                ReplyGuard: checks every draft reply before it is sent
       guardrails.py                 low-level reply checks (style, leaks, grounding, deadlines)

@@ -81,6 +81,7 @@ class OpenAITransport:
         instructions: str,
         input: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        text_format: dict[str, Any] | None = None,
         max_output_tokens: int = 1000,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
@@ -92,6 +93,7 @@ class OpenAITransport:
             instructions=instructions,
             input=input,
             tools=tools,
+            text_format=text_format,
             max_output_tokens=max_output_tokens,
             reasoning_effort=reasoning_effort,
             tool_choice=tool_choice,
@@ -113,6 +115,7 @@ class OpenAITransport:
         instructions: str,
         input: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
+        text_format: dict[str, Any] | None,
         max_output_tokens: int,
         reasoning_effort: str | None,
         tool_choice: str | dict[str, Any] | None,
@@ -130,6 +133,8 @@ class OpenAITransport:
         }
         if reasoning_effort:
             kwargs["reasoning"] = {"effort": reasoning_effort}
+        if text_format is not None:
+            kwargs["text"] = text_format
         if tools:
             kwargs["tools"] = tools
             kwargs["include"] = [ENCRYPTED_REASONING]

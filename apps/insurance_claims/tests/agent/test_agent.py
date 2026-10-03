@@ -271,22 +271,19 @@ def test_two_digit_year_and_spanish_dates_are_grounded(harness):
 
 
 def test_first_refusal_cannot_be_escalated_but_second_can(harness):
+    # Refusals are counted by code from the guard's review, so the agent cannot skip or fake the count.
     model = Scripted(
-        call("note_refusal"),
         call("request_human", reason="repeated_refusal"),
-        say("I understand. Verification protects your claim; any three details work."),
+        say("I understand. Verification protects your claim, and any three details work."),
     )
     h = harness(model=model)
     h.say("I already told you who I am. This is ridiculous.")
-    outs = model.outputs()
-    assert outs[0]["status"] == "keep_persuading" and outs[1]["error"] == "too_early"
-    assert not h.state.handoff.requested
-    model2 = Scripted(
-        call("note_refusal"), call("request_human", reason="repeated_refusal"), say("I won't keep asking. A representative will follow up.")
-    )
+    assert model.outputs()[0]["error"] == "too_early"
+    assert h.state.counters.refusals == 1 and not h.state.handoff.requested
+    model2 = Scripted(call("request_human", reason="repeated_refusal"), say("I won't keep asking. A representative will follow up."))
     h.runtime.agent.model = model2
     h.say("I said no. I'm not giving you anything.")
-    assert model2.outputs()[0]["status"] == "stop_persuading" and h.state.handoff.requested
+    assert h.state.counters.refusals == 2 and model2.outputs()[0]["status"] == "handoff_requested" and h.state.handoff.requested
 
 
 def test_internal_vocabulary_never_reaches_the_caller(harness):

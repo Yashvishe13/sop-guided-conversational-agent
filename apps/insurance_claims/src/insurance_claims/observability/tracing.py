@@ -525,6 +525,7 @@ def _request_metadata(kwargs: Mapping[str, Any]) -> dict[str, Any]:
         "max_output_tokens": kwargs.get("max_output_tokens") if isinstance(kwargs.get("max_output_tokens"), int) else None,
         "reasoning": _reasoning_meta(kwargs.get("reasoning")),
         "tool_names": _tool_names(kwargs.get("tools")),
+        "text_format_name": _short(_get(_get(kwargs.get("text"), "format"), "name")),
         "prompt_sha256": _sha256_of(kwargs.get("instructions")),
         "tool_choice": _tool_choice_meta(kwargs.get("tool_choice")),
         "stream": bool(kwargs.get("stream")),

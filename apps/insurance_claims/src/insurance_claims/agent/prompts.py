@@ -27,6 +27,7 @@ from typing import Any
 from insurance_claims.domain.models import Phase
 
 __all__ = [
+    "GUARD_TASKS",
     "MAX_PROMPT_FILE_BYTES",
     "REQUIRED_PHASES",
     "REQUIRED_TASKS",
@@ -41,7 +42,8 @@ class PromptError(RuntimeError):
 
 
 REQUIRED_PHASES: tuple[str, ...] = ("VERIFY_ID", "RESOLVE_INTENT", "PROCESS_CASE", "POST_PROCESS")
-REQUIRED_TASKS: tuple[str, ...] = ("agent",)
+GUARD_TASKS: tuple[str, ...] = ("guard_caller", "guard_consent", "guard_summary", "guard_reply")
+REQUIRED_TASKS: tuple[str, ...] = ("agent", *GUARD_TASKS)
 KNOWN_PHASES: frozenset[str] = frozenset(p.value for p in Phase)
 MAX_PROMPT_FILE_BYTES = 512 * 1024
 
@@ -56,6 +58,12 @@ class PromptSet:
     style_guideline: str
     phases: Mapping[str, str]
     tasks: Mapping[str, str]
+
+    def guard_instructions(self, task: str) -> str:
+        """Instructions for one guard checkpoint: the guard prompt alone, without the agent's prompts."""
+        if task not in GUARD_TASKS:
+            raise PromptError(f"Unknown guard task {task!r}")
+        return self.tasks[task]
 
     def instructions(self, task: str, phase: str) -> str:
         """Assemble the instructions for one model call (global, style, phase, task)."""

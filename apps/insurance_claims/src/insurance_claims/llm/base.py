@@ -112,6 +112,7 @@ class ModelTransport(Protocol):
         instructions: str,
         input: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        text_format: dict[str, Any] | None = None,
         max_output_tokens: int = 1000,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
@@ -121,6 +122,7 @@ class ModelTransport(Protocol):
         """Run one Responses API style call.
 
         ``task`` is local metadata (used by fakes, chaos, and traces); it is never sent to the provider.
+        ``text_format`` is the Responses ``text`` parameter, used by the guard for strict JSON verdicts.
         Raises :class:`LLMError` on transport/provider failure.
         """
         ...

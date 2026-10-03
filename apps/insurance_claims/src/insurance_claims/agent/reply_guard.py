@@ -15,6 +15,9 @@ What is checked, and why:
   - a passed appeal deadline must not be described as open, and the stated status must match;
   - the reply must not say verification is pending, or that an email was sent when it was not;
   - a claim conversation may not end without offering the email summary (POST_PROCESS).
+* Scope, for every reply that passes the checks above: the guard model (``agent/guard.py``)
+  judges whether the reply stays within claims support (for example, it must not explain
+  reinforcement learning). No verdict counts as a problem, so the reply is never sent unchecked.
 
 The low-level checks live in :mod:`insurance_claims.agent.guardrails`; this module applies
 them with the session's context.
@@ -26,6 +29,7 @@ import re
 from datetime import date
 from typing import Callable
 
+from insurance_claims.agent.guard import Guard
 from insurance_claims.agent.guardrails import (
     GroundingContext,
     check_email_status,
@@ -79,17 +83,33 @@ class ReplyGuard:
         schema_doc: ClaimSchemaDoc,
         secret_tokens: list[str],
         today: Callable[[], date],
+        guard: Guard,
     ) -> None:
         self.claims = claims
         self.guidelines = guidelines
         self.schema_doc = schema_doc
         self.secret_tokens = secret_tokens
         self.today = today
+        self.guard = guard
 
     def check(self, text: str, state: SessionState, effects: TurnEffects) -> list[str]:
         """Return the problems with ``text`` (empty when the reply may be sent)."""
         if not text.strip():
             return ["the reply was empty"]
+        problems = self._code_checks(text, state, effects)
+        return problems or self._scope_check(text, state)
+
+    def _scope_check(self, text: str, state: SessionState) -> list[str]:
+        caller_message = next((m.text for m in reversed(state.history) if m.role == "user"), "")
+        verdict = self.guard.judge_reply(caller_message=caller_message, reply=text)
+        if verdict is None:
+            return ["scope_unchecked: the reply could not be reviewed; write it again"]
+        if verdict.allowed:
+            return []
+        details = "; ".join(verdict.problems) or "it goes beyond insurance claims support"
+        return [f"out_of_scope: {details}. Do not answer unrelated requests; decline in one sentence and steer back to the claim"]
+
+    def _code_checks(self, text: str, state: SessionState, effects: TurnEffects) -> list[str]:
         problems = [f"{v.code}: {v.detail}" for v in check_style(text) + check_internal_reference(text)]
         if not state.verified:
             if check_pre_verification_leak(text, self.secret_tokens):

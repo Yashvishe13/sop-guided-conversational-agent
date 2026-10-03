@@ -357,9 +357,17 @@ def test_sha256_changes_when_a_guideline_changes(tmp_path: Path) -> None:
 
 
 def test_shipped_agent_prompts_state_the_rules(prompts: PromptSet) -> None:
-    assert set(prompts.tasks) == {"agent"}
+    assert set(prompts.tasks) == {"agent", "guard_caller", "guard_consent", "guard_summary", "guard_reply"}
     g = prompts.global_guideline.lower()
-    for rule in ("note_caller_context", "flag_off_topic", "request_human", "caller_message", "never invent"):
+    for rule in (
+        "caller_review",
+        "off_topic_request",
+        "stop_persuading",
+        "acting_for_someone_else",
+        "request_human",
+        "caller_message",
+        "never invent",
+    ):
         assert rule in g, rule
     assert "colon" in prompts.style_guideline.lower() and "em dash" in prompts.style_guideline.lower()
     assert "three of these are required" in prompts.phases["VERIFY_ID"].lower()

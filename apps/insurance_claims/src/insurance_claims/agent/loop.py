@@ -8,11 +8,16 @@ Each caller turn runs one loop against the Responses API::
            reply: checked by ReplyGuard (agent/reply_guard.py); a blocked draft goes back
                   to the model with the reasons, at most MAX_GUARDRAIL_RETRIES times
 
+Before the loop, the guard (agent/guard.py), an independent model reviewer, reads the
+caller's messages; code applies its findings (who is speaking, refusals, off-topic requests,
+the claim the caller described) before the agent sees the turn.
+
 The model owns the conversation: what to ask, which tool to call, when the claim is
-covered. The guardrails own what must never bend: verification needs three distinct
-matching PII fields the caller actually said; claim tools exist only after verification
-and only for the caller's own claims; no claim data before verification; replies are
-grounded in tool results; email goes out only after an explicit choice on an active offer.
+covered. The guardrails own what must never bend: verification needs the guard to confirm
+the person typing is the account holder and three distinct matching PII fields the caller
+actually said; claim tools exist only after verification and only for the caller's own
+claims; no claim data before verification; replies are grounded in tool results and stay in
+scope; email goes out only after an explicit choice on an active offer, confirmed by the guard.
 
 Public interface (used by web/service.py): ``new_state``, ``handle_turn``,
 ``complete_email``, ``rebuild_pending_email``.
@@ -28,6 +33,7 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable, Literal
 
 from insurance_claims.agent.budget import BudgetExceeded, TurnBudget
+from insurance_claims.agent.guard import CallerReview, Guard
 from insurance_claims.agent.guardrails import mechanical_style_fix, sanitize_markup
 from insurance_claims.agent.prompts import PromptSet
 from insurance_claims.agent.reply_guard import ReplyGuard
@@ -38,6 +44,7 @@ from insurance_claims.claims.repository import ClaimRepository, GuidelineReposit
 from insurance_claims.config import Settings
 from insurance_claims.domain.models import Phase
 from insurance_claims.domain.state import (
+    CaseHints,
     CaseSelection,
     ChatMessage,
     EmailOffer,
@@ -143,12 +150,20 @@ class ClaimsAgent:
         fixtures: FixtureBundle,
         prompts: PromptSet,
         model: ModelTransport,
+        guard_model: ModelTransport,
         clock: Callable[[], datetime],
         failure_ledger: Any | None = None,
     ) -> None:
         self.settings = settings
         self.prompts = prompts
         self.model = model
+        self.guard = Guard(
+            model=guard_model,
+            prompts=prompts,
+            reasoning_effort=settings.reasoning_effort_guard,
+            max_output_tokens=settings.max_output_tokens_guard,
+            timeout_s=settings.model_timeout_s,
+        )
         self.clock = clock
         self.failure_ledger = failure_ledger
         self.directory = PolicyholderDirectory(fixtures.policyholders)
@@ -163,6 +178,7 @@ class ClaimsAgent:
             # Every claim fact in the dataset; none of them may appear before verification.
             secret_tokens=secret_claim_tokens(self.claims.all_claims_unscoped()),
             today=self.today,
+            guard=self.guard,
         )
 
     # ------------------------------------------------------------------ public interface
@@ -278,10 +294,13 @@ class ClaimsAgent:
             msg = self._append(state, "assistant", _TURN_LIMIT, now)
             return TurnOutcome(state=state, messages=[msg], stop_reason="turn_limit")
 
+        review = self.guard.review_caller(self._transcript(state))
+        self._apply_caller_review(state, review, now)
         executor = ToolExecutor(
             state=state, now=now, today=self.today(), caller_text=self._caller_text(state),
             directory=self.directory, claims=self.claims, guidelines=self.guidelines, schema_doc=self.schema_doc,
             followup_rules=self.followup_rules, settings=self.settings, failure_ledger=self.failure_ledger,
+            guard=self.guard, caller_review=review,
         )  # fmt: skip
         items = self._history_items(state)
         if expired:
@@ -311,7 +330,7 @@ class ClaimsAgent:
                 resp = budget.call(
                     self.model,
                     task="agent",
-                    instructions=self._instructions(state),
+                    instructions=self._instructions(state, executor.caller_review),
                     input=items,
                     tools=tool_schemas(state),
                     tool_choice="none" if step == MAX_STEPS - 1 else "auto",
@@ -386,23 +405,37 @@ class ClaimsAgent:
         return TurnOutcome(state=state, messages=messages, stop_reason=stop)
 
     # ------------------------------------------------------------------ what the model sees
-    def _instructions(self, state: SessionState) -> str:
+    def _instructions(self, state: SessionState, review: CallerReview | None) -> str:
         base = self.prompts.instructions("agent", state.phase.value)
-        return f"{base}\n\n# Session context (from the application, trusted)\n{json.dumps(self._context(state), indent=1)}"
+        return f"{base}\n\n# Session context (from the application, trusted)\n{json.dumps(self._context(state, review), indent=1)}"
 
-    def _context(self, state: SessionState) -> dict[str, Any]:
+    def _context(self, state: SessionState, review: CallerReview | None) -> dict[str, Any]:
         """Trusted facts about the session. Claim facts are only included after verification."""
         h = state.hints
         remembered = {"reasons": h.question_summaries[-3:], "case_type": h.case_type, "status": h.status, "month": h.month, "year": h.year}
+        refusals, offtopic = state.counters.refusals, state.counters.off_topic_total
         ctx: dict[str, Any] = {
             "phase": state.phase.value,
             "verified": state.verified,
             "today": self.today().isoformat(),
             "tools_available": list(tool_names(state)),
+            "caller_review": (
+                {
+                    "speaker": "acting_for_someone_else" if state.verification.representative_declared else review.speaker,
+                    "refused_verification": review.refused_verification,
+                    "off_topic_request": review.off_topic_request,
+                }
+                if review
+                else "unavailable"
+            ),
             "remembered_context": {k: v for k, v in remembered.items() if v},
-            "off_topic_count": state.counters.off_topic_total,
+            "verification": {
+                "failed_attempts": state.verification.failed_attempts,
+                "refusals": refusals,
+                "stop_persuading": refusals >= self.settings.max_refusals,
+            },
+            "off_topic": {"count": offtopic, "offer_human": offtopic >= self.settings.max_off_topic},
             "handoff": {"offered": state.handoff.offered, "requested": state.handoff.requested},
-            "failed_verification_attempts": state.verification.failed_attempts,
         }
         if state.verified:
             ctx["caller_first_name"] = self.directory.first_name(state.verification.party_id or "")
@@ -411,6 +444,12 @@ class ClaimsAgent:
                 ctx["document_status"] = state.documents.get(state.case.case_id, {})
             ctx["email_offer"] = state.email.status
         return ctx
+
+    def _transcript(self, state: SessionState) -> list[dict[str, str]]:
+        """The conversation since the last identity reset, for the guard's caller review."""
+        floor = self._history_floor(state)
+        recent = [m for m in state.history if m.turn_index >= floor][-HISTORY_MESSAGES:]
+        return [{"speaker": "caller" if m.role == "user" else "representative", "text": m.text} for m in recent]
 
     def _history_floor(self, state: SessionState) -> int:
         """Turn index of the last verification reset; earlier messages are not used."""
@@ -434,6 +473,65 @@ class ClaimsAgent:
         """Everything the caller typed since the last reset; identity values must appear here."""
         floor = self._history_floor(state)
         return "\n".join(m.text for m in state.history if m.role == "user" and m.turn_index >= floor)
+
+    # ------------------------------------------------------------------ applying the guard's caller review
+    def _apply_caller_review(self, state: SessionState, review: CallerReview | None, now: datetime) -> None:
+        """Code, not the agent, acts on what the guard found in the caller's messages."""
+        if review is None:
+            tracing.event("guardrail", rule="caller_review_unavailable")
+            return  # fail closed: verify_identity refuses without a confirmed speaker
+        if review.speaker == "acting_for_someone_else":
+            state.verification.representative_declared = True  # sticky for the rest of the session
+            state.handoff.offered = True
+            if state.verified:
+                self._withdraw_access(state, now)
+        elif review.different_person and state.verified:
+            self._withdraw_access(state, now)
+        if review.refused_verification and state.phase == Phase.VERIFY_ID:
+            state.counters.refusals += 1
+            if state.counters.refusals >= self.settings.max_refusals:
+                state.handoff.offered = True
+        if review.off_topic_request:
+            state.counters.off_topic_total += 1
+            if state.counters.off_topic_total >= self.settings.max_off_topic:
+                state.handoff.offered = True
+        self._remember(state, review)
+        tracing.event(
+            "guardrail",
+            rule="caller_review",
+            speaker=review.speaker,
+            different_person=review.different_person,
+            refusals=state.counters.refusals,
+            off_topic=state.counters.off_topic_total,
+        )
+
+    def _remember(self, state: SessionState, review: CallerReview) -> None:
+        """Keep the claim the caller described (untrusted memory, used only after verification)."""
+        h, mentioned = state.hints, review.claim_mentioned
+        if review.reason and review.reason not in h.question_summaries:
+            h.question_summaries = [*h.question_summaries, review.reason[:200]][-5:]
+        if mentioned.case_type:
+            h.case_type = mentioned.case_type
+        if mentioned.status:
+            h.status = mentioned.status
+        if mentioned.month and 1 <= mentioned.month <= 12:
+            h.month = mentioned.month
+        if mentioned.year and 2000 <= mentioned.year <= self.today().year + 1:
+            h.year = mentioned.year
+        if h.first_turn is None and (review.reason or mentioned.case_type or mentioned.status or mentioned.month):
+            h.first_turn, h.captured_in_phase = state.turn_index, state.phase
+
+    def _withdraw_access(self, state: SessionState, now: datetime) -> None:
+        """A different person (or someone acting for the policyholder) is typing: back to VERIFY_ID with nothing carried over."""
+        old = state.verification
+        state.verification = VerificationState(failed_attempts=old.failed_attempts, representative_declared=old.representative_declared)
+        state.case = CaseSelection()
+        state.hints = CaseHints()
+        state.documents = {}
+        if state.email.status == "offered":
+            state.email = EmailOffer(send_count=state.email.send_count)
+        tracing.event("guardrail", rule="caller_changed")
+        self._transition(state, Phase.VERIFY_ID, "caller_changed", now)
 
     # ------------------------------------------------------------------ state helpers
     def _append(self, state: SessionState, role: Literal["user", "assistant"], text: str, now: datetime, kind: str = "chat") -> ChatMessage:

@@ -13,6 +13,15 @@ of a tool succeeding:
 Which tools the model can see depends on the phase (``tool_schemas``), and the
 executor re-checks the phase anyway, so a hallucinated or out-of-phase call is
 refused with an explanation the model can act on.
+
+Three tools also consult the guard (``agent/guard.py``), an independent model reviewer, and
+fail closed when it gives no clear verdict:
+
+* ``verify_identity`` runs only when this turn's caller review says the person typing is the
+  account holder (not someone acting for another person, not unclear);
+* ``record_email_decision`` is recorded only when the guard reads the same choice in the
+  caller's own words;
+* ``offer_email_summary`` is offered only when the guard finds every statement supported.
 """
 
 from __future__ import annotations
@@ -23,8 +32,9 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
-from insurance_claims.agent.guardrails import check_style
-from insurance_claims.claims.evidence import EvidencePacket, build_case_evidence
+from insurance_claims.agent.guard import CallerReview, Guard
+from insurance_claims.agent.guardrails import GroundingContext, check_grounding, check_internal_reference, check_style
+from insurance_claims.claims.evidence import EvidencePacket, build_case_evidence, grounding_tokens
 from insurance_claims.claims.normalize import (
     MONTHS,
     identity_value_grounded,
@@ -127,18 +137,6 @@ def _fn(name: str, desc: str, props: dict[str, Any]) -> dict[str, Any]:
 
 
 SCHEMAS: dict[str, dict[str, Any]] = {
-    "note_caller_context": _fn(
-        "note_caller_context",
-        "Remember why the caller is calling (any phase, even before verification), e.g. 'denied healthcare claim from January'. "
-        "Call it as soon as the caller mentions it. Hints are used after verification to find the claim.",
-        {
-            "reason": _nullable("string", "Short paraphrase of the caller's reason for calling, no personal data."),
-            "case_type": _nullable("string", "Claim type if mentioned.", CASE_TYPES),
-            "status": _nullable("string", "Claim status if mentioned.", STATUSES),
-            "month": _nullable("integer", "Month 1-12 the claim is from, if mentioned."),
-            "year": _nullable("integer", "Year the claim is from, if mentioned."),
-        },
-    ),
     "verify_identity": _fn(
         "verify_identity",
         "Check the caller's identity. Submit every identity detail the caller has stated anywhere in this conversation (values only, normalized as described per field). "
@@ -153,10 +151,6 @@ SCHEMAS: dict[str, dict[str, Any]] = {
             "email": _nullable("string", "Email as stated."),
             "id_last4": _nullable("string", "Exactly the four digits, e.g. 4472."),
             "policy_number": _nullable("string", "Policy number such as POL-1234."),
-            "caller_is_policyholder": {
-                "type": "boolean",
-                "description": "False if the caller is acting for someone else (a relative, friend, or agent).",
-            },
         },
     ),
     "list_my_claims": _fn("list_my_claims", "List the verified caller's claims (type, date, status, claim ID).", {}),
@@ -199,19 +193,6 @@ SCHEMAS: dict[str, dict[str, Any]] = {
         "Record the caller's explicit answer to the email offer. Only call it when the caller clearly said to send or to skip.",
         {"decision": {"type": "string", "enum": ["send", "skip"]}},
     ),
-    "report_caller_change": _fn(
-        "report_caller_change",
-        "Call when, after verification, the person speaking appears to be someone else (a different name, or acting for someone else). "
-        "Access is withdrawn and the new caller must verify. Do not share anything more about the previous caller's claims.",
-        {"acting_for_someone_else": {"type": "boolean", "description": "True if the new speaker says they act for the policyholder."}},
-    ),
-    "flag_off_topic": _fn("flag_off_topic", "Record that the caller asked something unrelated to insurance claims.", {}),
-    "note_refusal": _fn(
-        "note_refusal",
-        "Call whenever the caller refuses or resists verification (e.g. 'I already told you who I am', 'I'm not giving you that'). "
-        "The result tells you whether to keep persuading (explain why and offer alternative details) or to stop and offer a human.",
-        {},
-    ),
     "request_human": _fn(
         "request_human",
         "Hand the conversation to a human representative.",
@@ -232,11 +213,10 @@ SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 # ---------------------------------------------------------------------- which tools each phase exposes
-ALWAYS = ("note_caller_context", "flag_off_topic", "request_human")
-VERIFY_ONLY = ("note_refusal",)
+ALWAYS = ("request_human",)
 BY_PHASE: dict[Phase, tuple[str, ...]] = {
     Phase.VERIFY_ID: ("verify_identity",),
-    Phase.RESOLVE_INTENT: ("list_my_claims", "select_claim", "report_caller_change"),
+    Phase.RESOLVE_INTENT: ("list_my_claims", "select_claim"),
     Phase.PROCESS_CASE: (
         "list_my_claims",
         "select_claim",
@@ -245,7 +225,6 @@ BY_PHASE: dict[Phase, tuple[str, ...]] = {
         "get_followup_guidance",
         "record_document_status",
         "offer_email_summary",
-        "report_caller_change",
     ),
     Phase.POST_PROCESS: (
         "list_my_claims",
@@ -255,14 +234,13 @@ BY_PHASE: dict[Phase, tuple[str, ...]] = {
         "get_followup_guidance",
         "record_email_decision",
         "offer_email_summary",
-        "report_caller_change",
     ),
 }
 
 
 def tool_names(state: SessionState) -> tuple[str, ...]:
     """The tool menu for the current state. The executor re-checks it on every call."""
-    names = list(BY_PHASE[state.phase]) + list(ALWAYS) + (list(VERIFY_ONLY) if state.phase == Phase.VERIFY_ID else [])
+    names = list(BY_PHASE[state.phase]) + list(ALWAYS)
     if state.phase == Phase.POST_PROCESS and state.email.status != "offered":
         names.remove("record_email_decision")
     if state.phase == Phase.POST_PROCESS and state.email.status in ("offered", "consented", "dispatching", "sent", "queued"):
@@ -319,6 +297,8 @@ class ToolExecutor:
         followup_rules: tuple[Any, ...],
         settings: Any,
         failure_ledger: Any | None,
+        guard: Guard,
+        caller_review: CallerReview | None,
     ) -> None:
         self.state = state
         self.now = now
@@ -331,6 +311,9 @@ class ToolExecutor:
         self.followup_rules = followup_rules
         self.settings = settings
         self.failure_ledger = failure_ledger
+        self.guard = guard
+        self.caller_review = caller_review
+        """This turn's guard review of the caller (None when the guard gave no verdict)."""
         self.effects = TurnEffects()
         self.calls: list[dict[str, Any]] = []
         self._seen: dict[str, int] = {}
@@ -391,91 +374,7 @@ class ToolExecutor:
         self.state.phase_log = self.state.phase_log[-50:]
         self.state.phase = to
 
-    # ------------------------------------------------------------------ memory, scope, handoff
-    def _note_caller_context(self, a: dict[str, Any]) -> ToolResult:
-        h = self.state.hints
-        if a.get("reason"):
-            h.question_summaries = [*h.question_summaries, str(a["reason"])[:200]][-5:]
-        if a.get("case_type") in CASE_TYPES:
-            h.case_type = a["case_type"]
-        if a.get("status") in STATUSES:
-            h.status = a["status"]
-        if isinstance(a.get("month"), int) and 1 <= a["month"] <= 12:
-            h.month = a["month"]
-        if isinstance(a.get("year"), int) and 2000 <= a["year"] <= self.today.year + 1:
-            h.year = a["year"]
-        if h.first_turn is None:
-            h.first_turn, h.captured_in_phase = self.state.turn_index, self.state.phase
-        tracing.event("memory", phase=self.state.phase.value, hints=h.model_dump(exclude={"question_summaries"}, mode="json"))
-        note = (
-            "Noted."
-            if self.state.verified
-            else "Noted. Keep it for after verification; do not discuss the claim until verify_identity returns verified."
-        )
-        return ToolResult("note_caller_context", True, {"status": "noted", "message": note})
-
-    def _flag_off_topic(self, a: dict[str, Any]) -> ToolResult:
-        c = self.state.counters
-        c.off_topic_total += 1
-        offer = c.off_topic_total >= self.settings.max_off_topic
-        if offer:
-            self.state.handoff.offered = True
-        tracing.event("guardrail", rule="off_topic", count=c.off_topic_total, offer_human=offer)
-        msg = "Politely decline in one sentence and steer back to the claim."
-        if offer:
-            msg += " The caller has gone off topic repeatedly: also offer to connect them with a human representative."
-        return ToolResult(
-            "flag_off_topic", True, {"status": "recorded", "off_topic_count": c.off_topic_total, "offer_human": offer, "message": msg}
-        )
-
-    def _report_caller_change(self, a: dict[str, Any]) -> ToolResult:
-        old = self.state.verification
-        self.state.verification = type(old)(
-            failed_attempts=old.failed_attempts,
-            representative_declared=bool(a.get("acting_for_someone_else")) or old.representative_declared,
-        )
-        self.state.case = CaseSelection()
-        self.state.hints = type(self.state.hints)()
-        self.state.documents = {}
-        if self.state.email.status == "offered":
-            self.state.email = EmailOffer(send_count=self.state.email.send_count)
-        self._transition(Phase.VERIFY_ID, "caller_changed")
-        tracing.event("guardrail", rule="caller_changed")
-        return ToolResult(
-            "report_caller_change",
-            True,
-            {
-                "status": "access_withdrawn",
-                "message": "Access withdrawn. Say nothing more about the previous claims. Explain that you need to verify the person you are now speaking with, or offer a human representative if they act for someone else.",
-            },
-        )
-
-    def _note_refusal(self, a: dict[str, Any]) -> ToolResult:
-        c = self.state.counters
-        c.refusals += 1
-        stop = c.refusals >= self.settings.max_refusals
-        tracing.event("guardrail", rule="refusal", count=c.refusals, stop_persuading=stop)
-        if stop:
-            self.state.handoff.offered = True
-            return ToolResult(
-                "note_refusal",
-                True,
-                {
-                    "status": "stop_persuading",
-                    "refusals": c.refusals,
-                    "message": "The caller has refused again. Acknowledge their feelings, stop asking for details, and offer a human representative (request_human with reason repeated_refusal if they agree or if they keep refusing).",
-                },
-            )
-        return ToolResult(
-            "note_refusal",
-            True,
-            {
-                "status": "keep_persuading",
-                "refusals": c.refusals,
-                "message": "First refusal. Acknowledge the feeling, explain briefly that verification protects their private claim information, and offer the alternative details they can use (full name, date of birth, phone or email on file, last four of SSN or national ID; any three). Do not hand off yet unless they ask for a person.",
-            },
-        )
-
+    # ------------------------------------------------------------------ handoff
     def _request_human(self, a: dict[str, Any]) -> ToolResult:
         if a.get("reason") == "repeated_refusal" and self.state.counters.refusals < self.settings.max_refusals:
             tracing.event("guardrail", rule="premature_handoff", refusals=self.state.counters.refusals)
@@ -504,8 +403,6 @@ class ToolExecutor:
     # ------------------------------------------------------------------ VERIFY_ID
     def _verify_identity(self, a: dict[str, Any]) -> ToolResult:
         v = self.state.verification
-        if a.get("caller_is_policyholder") is False:
-            v.representative_declared = True
         if v.representative_declared:
             self.state.handoff.offered = True
             tracing.event("guardrail", rule="representative_not_authorized")
@@ -523,6 +420,18 @@ class ToolExecutor:
                 False,
                 {"status": "locked", "message": "Verification is locked for this conversation. Offer a human representative."},
             )
+
+        # Guardrail 0: the guard must have confirmed that the person typing is the account holder.
+        speaker = self.caller_review.speaker if self.caller_review else None
+        if speaker != "account_holder":
+            tracing.event("guardrail", rule="speaker_not_confirmed", speaker=speaker or "no_verdict")
+            message = (
+                "It is not clear whether the person typing is the policyholder. Ask whether they are the policyholder themselves "
+                "before verifying; if they act for someone else, offer a human representative."
+                if speaker == "unclear"
+                else "Who is speaking could not be confirmed right now. Ask the caller to send their details again."
+            )
+            return ToolResult("verify_identity", False, {"status": "speaker_not_confirmed", "message": message})
 
         # Guardrail 1: only values the caller actually said count.
         accepted: dict[str, str] = {}
@@ -669,7 +578,12 @@ class ToolExecutor:
                 {"error": "not_found", "message": "No claim with that ID on this caller's account. Use list_my_claims."},
             )
         claim = found.claims[0]
-        self._back_to_case()  # a new claim question withdraws any open email offer
+        self._back_to_case(claim.case_id)  # another claim withdraws an open email offer
+        if self.state.phase == Phase.POST_PROCESS:  # the same claim, with the email offer still open
+            self.effects.fetched_case_ids.add(claim.case_id)
+            return ToolResult(
+                "select_claim", True, {"status": "selected", "case_id": claim.case_id, "message": "This claim is already selected."}
+            )
         if self.state.case.case_id != claim.case_id:
             self.state.case = CaseSelection(case_id=claim.case_id, selected_turn=self.state.turn_index)
         self._transition(Phase.PROCESS_CASE, "claim_selected")
@@ -709,12 +623,18 @@ class ToolExecutor:
             },
         )
 
-    def _back_to_case(self) -> None:
-        """A claim question after the wrap-up reopens PROCESS_CASE and withdraws an unanswered email offer."""
-        if self.state.phase == Phase.POST_PROCESS:
-            if self.state.email.status == "offered":
-                self.state.email = EmailOffer(send_count=self.state.email.send_count)
-            self._transition(Phase.PROCESS_CASE, "case_question_after_wrap_up")
+    def _back_to_case(self, case_id: str | None = None) -> None:
+        """Called by claim tools. After the wrap-up, a question reopens PROCESS_CASE, with one exception:
+        while an email offer is open, questions about the same claim are answered without withdrawing it,
+        so the caller can still say yes. Switching to another claim always withdraws the offer."""
+        if self.state.phase != Phase.POST_PROCESS:
+            return
+        same_claim = case_id is None or case_id == self.state.case.case_id
+        if self.state.email.status == "offered" and same_claim:
+            return
+        if self.state.email.status == "offered":
+            self.state.email = EmailOffer(send_count=self.state.email.send_count)
+        self._transition(Phase.PROCESS_CASE, "case_question_after_wrap_up")
 
     def _doc(self, claim: Claim, name: str) -> str | None:
         """Match the model's document name to one listed on the claim (loose, case-insensitive)."""
@@ -765,7 +685,7 @@ class ToolExecutor:
 
     # ------------------------------------------------------------------ POST_PROCESS
     def _offer_email_summary(self, a: dict[str, Any]) -> ToolResult:
-        """The model writes the summary; code checks it covers the claim ID, status, and every open document."""
+        """The model writes the summary. Code checks its required content and grounding, then the guard fact checks it."""
         claim = self._selected()
         summary = str(a.get("summary", "")).strip()
         problems = []
@@ -780,6 +700,12 @@ class ToolExecutor:
             problems.append("remove every colon and em dash")
         if len(summary) < 80 or len(summary) > 1800:
             problems.append("write 3 to 7 sentences")
+        packet = build_case_evidence(claim, self.guidelines, self.schema_doc, today=self.today)
+        if not problems:
+            problems += [f"{v.code}: {v.detail}" for v in check_grounding(summary, self._summary_grounding(claim, packet))]
+            problems += [f"{v.code}: {v.detail}" for v in check_internal_reference(summary)]
+        if not problems:
+            problems += self._fact_check_summary(summary, claim, packet)
         if problems:
             tracing.event("guardrail", rule="email_summary_incomplete", problems=problems)
             return ToolResult("offer_email_summary", False, {"error": "summary_rejected", "fix": problems})
@@ -801,8 +727,41 @@ class ToolExecutor:
             },
         )
 
+    def _summary_grounding(self, claim: Claim, packet: EvidencePacket) -> GroundingContext:
+        return GroundingContext(
+            tokens=grounding_tokens(packet),
+            allowed_case_ids=frozenset({claim.case_id}),
+            today=self.today,
+            deadline=claim.appeal_deadline,
+            deadline_passed=bool(claim.appeal_deadline and claim.appeal_deadline < self.today),
+            case_status=claim.status,
+        )
+
+    def _fact_check_summary(self, summary: str, claim: Claim, packet: EvidencePacket) -> list[str]:
+        """Ask the guard whether every statement is supported by the record and the caller's own words."""
+        recorded = self.state.documents.get(claim.case_id, {})
+        guidance = [d.get(k) or "" for d in packet.documents for k in ("guidance", "alternative")]
+        guidance += [packet.case_type_guidance or "", packet.default_guidance, packet.processing_time or "", packet.human_review_rule or ""]
+        guidance += [self.guidelines.render_followup(rule, claim) for rule in self.followup_rules]
+        verdict = self.guard.judge_summary(
+            summary=summary,
+            claim={**packet.case, "appeal_deadline_status": packet.deadline},
+            document_status={doc: recorded.get(doc, "unknown") for doc in claim.documents_needed},
+            guidance=[g for g in guidance if g],
+            today=self.today.isoformat(),
+            caller_messages=self.caller_text.splitlines(),
+        )
+        if verdict is None:
+            return ["the summary could not be fact checked right now; try offering it again"]
+        if not verdict.supported:
+            return verdict.problems or ["the summary contains statements the record does not support"]
+        return []
+
     def _record_email_decision(self, a: dict[str, Any]) -> ToolResult:
-        """Consent must come in a later turn than the offer; the actual send happens in the agent after the loop."""
+        """Records the caller's choice only if the guard reads the same choice in the caller's own words.
+
+        Consent must also come in a later turn than the offer; the actual send happens in the agent after the loop.
+        """
         if self.state.email.status != "offered":
             return ToolResult("record_email_decision", False, {"error": "no_active_offer"})
         if self.state.email.offered_turn == self.state.turn_index:
@@ -811,6 +770,22 @@ class ToolExecutor:
         decision = a.get("decision")
         if decision not in ("send", "skip"):
             return ToolResult("record_email_decision", False, {"error": "invalid"})
+        offer = next((m.text for m in reversed(self.state.history) if m.kind == "email_offer"), "")
+        replies = [m.text for m in self.state.history if m.role == "user" and m.turn_index > (self.state.email.offered_turn or 0)]
+        verdict = self.guard.judge_consent(offer=offer, caller_replies=replies[-5:])
+        heard = verdict.decision if verdict else "no_verdict"
+        tracing.event("guardrail", rule="email_consent_check", agent=decision, guard=heard, agreed=heard == decision)
+        if heard != decision:
+            return ToolResult(
+                "record_email_decision",
+                False,
+                {
+                    "error": "decision_not_confirmed",
+                    "message": "The caller's own words are not a clear choice to "
+                    + ("send the email" if decision == "send" else "skip the email")
+                    + ". Do not treat it as an answer. Ask them directly whether they want the summary emailed, or mention the Send and Skip buttons.",
+                },
+            )
         self.effects.email_decision = decision
         return ToolResult(
             "record_email_decision",

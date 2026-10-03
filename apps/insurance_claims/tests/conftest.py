@@ -89,15 +89,19 @@ class Harness:
 def make_runtime(settings: Settings, clock: FakeClock) -> Callable[..., Any]:
     from insurance_claims.web.app import Runtime
 
-    def _make(model: Any = None, email_transport: Any = None, settings_override: Settings | None = None) -> Any:
-        return Runtime(settings_override or settings, model=model, email_transport=email_transport, clock=clock)
+    def _make(model: Any = None, email_transport: Any = None, settings_override: Settings | None = None, guard_model: Any = None) -> Any:
+        return Runtime(settings_override or settings, model=model, guard_model=guard_model, email_transport=email_transport, clock=clock)
 
     return _make
 
 
 @pytest.fixture
 def harness(make_runtime: Callable[..., Any]) -> Callable[..., Harness]:
-    def _make(model: Any = None, email_transport: Any = None, settings_override: Settings | None = None) -> Harness:
-        return Harness(make_runtime(model=model, email_transport=email_transport, settings_override=settings_override))
+    def _make(
+        model: Any = None, email_transport: Any = None, settings_override: Settings | None = None, guard_model: Any = None
+    ) -> Harness:
+        return Harness(
+            make_runtime(model=model, email_transport=email_transport, settings_override=settings_override, guard_model=guard_model)
+        )
 
     return _make

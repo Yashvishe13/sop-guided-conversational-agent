@@ -2,7 +2,8 @@
 
 The offline fake model is wrapped in ChaosTransport (malformed and extra tool arguments,
 hallucinated tools, mismatched call IDs, injected text, style violations, refusals,
-timeouts...). Whatever the model does, the guardrails must hold on every turn.
+timeouts...), and in half of the runs the guard is too. Whatever either model does, the
+guardrails must hold on every turn.
 """
 
 from __future__ import annotations
@@ -27,8 +28,11 @@ TURNS = (
 
 
 @pytest.mark.parametrize("seed", range(30))
-def test_guardrails_hold_under_chaos(harness, seed: int) -> None:
-    h = harness(model=ChaosTransport(OfflineFakeModel(today=TODAY), seed=seed, rate=0.5))
+@pytest.mark.parametrize("guard_faults", [False, True], ids=["clean_guard", "faulty_guard"])
+def test_guardrails_hold_under_chaos(harness, seed: int, guard_faults: bool) -> None:
+    # With guard_faults the guard's verdicts are corrupted too (invalid JSON, refusals, timeouts...): it must fail closed.
+    guard = ChaosTransport(OfflineFakeModel(today=TODAY), seed=seed + 1000, rate=0.4) if guard_faults else None
+    h = harness(model=ChaosTransport(OfflineFakeModel(today=TODAY), seed=seed, rate=0.5), guard_model=guard)
     secrets = secret_claim_tokens(h.runtime.agent.claims.all_claims_unscoped())
     for text in TURNS:
         payload = h.say(text)
