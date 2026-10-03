@@ -30,6 +30,15 @@ _REFUSAL = re.compile(r"already told you|not giving|won'?t give|why do i (?:have
 _YES = re.compile(r"\b(?:yes|yeah|sure|send it|go ahead|please do)\b", re.IGNORECASE)
 _NO = re.compile(r"\b(?:no|nope|skip|don'?t)\b", re.IGNORECASE)
 _UNSUPPORTED = re.compile(r"already (?:submitted|sent|received)|no (?:further )?action (?:is )?needed|will be approved", re.IGNORECASE)
+_ON_FILE = re.compile(
+    r"\b(?:complete and on file|on file|we(?:'ve| have) received|no longer needed|nothing (?:else|more) is needed)\b", re.IGNORECASE
+)
+_DOC_SAYS = (
+    ("already_sent", re.compile(r"already (?:sent|uploaded|faxed|submitted)", re.IGNORECASE)),
+    ("cannot_obtain", re.compile(r"can'?t get|cannot get|won'?t (?:re)?send|refuses?", re.IGNORECASE)),
+    ("can_request", re.compile(r"\bcan (?:get|request|ask)\b|\bwill (?:get|request|ask)\b", re.IGNORECASE)),
+    ("has_it", re.compile(r"\bi (?:have|got) (?:it|the|both)\b", re.IGNORECASE)),
+)
 _OUT_OF_SCOPE = re.compile(r"reinforcement learning|machine learning|\bdef \w+\(|world cup", re.IGNORECASE)
 
 
@@ -205,6 +214,11 @@ def _guard_verdict(task: str, payload: dict[str, Any]) -> dict[str, Any]:
                 "month": 1 if "january" in low else None,
                 "year": None,
             },
+            "identity_fields_given": [
+                name
+                for name, pattern in (("full_name", _NAME), ("dob", _DOB), ("phone", _PHONE), ("email", _EMAIL), ("id_last4", _LAST4))
+                if pattern.search(everything)
+            ],
             "reason": "question about a claim" if "claim" in low else None,
             "rationale": "keyword heuristic",
         }
@@ -215,5 +229,15 @@ def _guard_verdict(task: str, payload: dict[str, Any]) -> dict[str, Any]:
     if task == "guard_summary":
         bad = _UNSUPPORTED.search(payload["summary"])
         return {"supported": not bad, "problems": [f"unsupported statement: {bad.group(0)}"] if bad else []}
-    bad = _OUT_OF_SCOPE.search(payload["reply"])
-    return {"allowed": not bad, "problems": [f"out of scope: {bad.group(0)}"] if bad else []}
+    if task == "guard_document":
+        latest = " ".join(payload["caller_messages"][-3:])
+        status = next((name for name, pattern in _DOC_SAYS if pattern.search(latest)), "unknown")
+        return {"status": status, "rationale": "keyword heuristic"}
+    reply, problems = payload["reply"], []
+    if bad := _OUT_OF_SCOPE.search(reply):
+        problems.append({"category": "out_of_scope", "detail": f"answers an unrelated request ({bad.group(0)})"})
+    selected = (payload.get("record") or {}).get("selected_claim") or {}
+    outstanding = [d for d, st in (selected.get("document_status") or {}).items() if st != "already_sent"]
+    if outstanding and (bad := _ON_FILE.search(reply)):
+        problems.append({"category": "unsupported_fact", "detail": f"says '{bad.group(0)}' but documents are still required"})
+    return {"allowed": not problems, "problems": problems}

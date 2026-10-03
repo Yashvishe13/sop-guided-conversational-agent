@@ -33,7 +33,7 @@ agent/loop.py      ClaimsAgent.handle_turn: guard reviews the caller, then the R
    ├─ agent/guard.py        Guard: independent model reviewer with its own prompts and transport
    ├─ agent/tools.py        tool schemas, per-phase tool menu, ToolExecutor (tool guardrails)
    │    └─ claims/          fixtures, party-scoped repositories, identity matching, evidence packets
-   ├─ agent/reply_guard.py  ReplyGuard: checks each draft (agent/guardrails.py, then the guard's scope check)
+   ├─ agent/reply_guard.py  ReplyGuard: checks each draft (agent/guardrails.py, then the guard's full review)
    ├─ agent/prompts.py      prompts.toml: agent prompts (global, style, per phase) and guard prompts
    └─ llm/                  Responses API transport with retries (fake and chaos transports for tests)
 persistence/store.py   encrypted SQLite: sessions (versioned), turns, email ledger, verification failures
@@ -96,6 +96,7 @@ review (a different person or someone acting for the policyholder -> VERIFY_ID).
 | Verification | `verify_identity` runs only when this turn's guard review says the person typing is the account holder. Then each value must normalize and appear in the caller's own messages since the last reset (`identity_value_grounded`); at least 3 distinct PII fields (policy number never counts) before any matching; deterministic match to exactly one policyholder with no conflicting field (`claims/verification.py`); per-session lockout after `MAX_VERIFICATION_FAILURES`, cross-session lockout per policyholder (fails closed) |
 | Data access | Claim tools exist only after verification and are scoped to the verified party; another party's claim ID returns "not found" |
 | Persuasion | Refusals are counted by code from the guard's review; `request_human(reason=repeated_refusal)` is refused before `MAX_REFUSALS` |
+| Document status | `record_document_status` stores a status only when the guard reads the same status in the caller's words |
 | Email summary | `offer_email_summary`: code requires the claim ID, the status, every outstanding document, the style rules, and grounded amounts and dates; then the guard fact checks every statement against the claim record, recorded document status, approved guidance, and the caller's words |
 | Consent | `record_email_decision` only on an active offer, never in the same turn as the offer, and only when the guard reads the same choice in the caller's own words; the recipient is always the address on file |
 | Repetition | The same tool with the same arguments twice in one turn is refused (except `verify_identity`) |
@@ -104,19 +105,31 @@ review (a different person or someone acting for the policyholder -> VERIFY_ID).
 ## 5. The guard (`agent/guard.py`, `[tasks.guard_*]` in `prompts.toml`)
 
 The guard follows the pattern of a permission classifier: a separate model call, made by code
-(never by the agent), that returns a verdict before an action is allowed.
+(never by the agent), that returns a verdict before an action is allowed. It runs every time, not
+at selected moments: on every caller message (in), on every reply the agent drafts in every phase
+(out), and on every action that changes what the application stores or sends. The only texts it
+does not review are the application's own fixed messages (greeting, safe fallbacks, delivery
+notices), which contain no model output.
 
 | Checkpoint | When | Verdict | Code's response |
 | --- | --- | --- | --- |
-| `review_caller` | every typed message, before the agent | `speaker` (account_holder / acting_for_someone_else / unclear), `different_person`, `refused_verification`, `off_topic_request`, `claim_mentioned`, `reason` | acting for someone else: blocked from verification for the session and offered a human, and access is withdrawn if already verified; a different person after verification: access withdrawn; refusals and off-topic requests counted (a human is offered at the limits); the described claim remembered |
+| `review_caller` | every typed message, before the agent | `speaker` (account_holder / acting_for_someone_else / unclear), `different_person`, `refused_verification`, `off_topic_request`, `claim_mentioned`, `identity_fields_given` (names only), `reason` | acting for someone else: blocked from verification for the session and offered a human, and access is withdrawn if already verified; a different person after verification: access withdrawn; refusals and off-topic requests counted (a human is offered at the limits); the described claim remembered; a reply that asks for more identity details after three were given, without trying `verify_identity`, is blocked |
 | `judge_consent` | `record_email_decision` | `decision` (send / skip / unclear) | the agent's decision is recorded only if it matches |
 | `judge_summary` | `offer_email_summary` | `supported`, `problems` | an unsupported or incomplete summary is rejected with the problems |
-| `judge_reply` | every draft that passed the code checks | `allowed`, `problems` | an out-of-scope reply is blocked and rewritten |
+| `judge_document` | `record_document_status` | `status` the caller's words indicate | the status is stored only if it matches the agent's |
+| `judge_reply` | every draft reply, every phase, after the code checks | `allowed`, `problems` with a category: `unsupported_fact`, `disclosed_before_verification`, `promise_or_invented_action`, `out_of_scope`, `internal_details` | any problem blocks the reply and is sent back to the agent to fix |
+
+The reply review gets the recent transcript, whether the caller is verified, the record (nothing
+before verification; afterwards the claims on the account, the selected claim's full record with
+what the caller said about each document), and the results of the claim tools the agent called
+this turn. It checks every claim statement against them, so "the pathology report is complete and
+on file" is blocked when the record lists it as required.
 
 * **Independent.** The guard has its own transport (`Runtime.guard_model`) and its own prompts, used
   alone (without the agent's prompts). It sees only what it judges, as one JSON document: the
-  transcript, the offer and the caller's replies, the summary with the record, or the reply with
-  the caller's message. It never sees the agent's reasoning or tool calls.
+  transcript, the offer and the caller's replies, the summary with the record, the caller's words
+  about one document, or the reply with the record and this turn's claim tool results. It never
+  sees the agent's reasoning or the arguments of its tool calls.
 * **Untrusted text stays data.** Caller text is a JSON string value, so it cannot close a tag or
   pose as instructions; the prompts tell the guard to ignore instructions inside the data.
 * **Strict output.** Each checkpoint uses a strict JSON schema (structured output) and the result
@@ -142,7 +155,9 @@ The guard follows the pattern of a permission classifier: a separate model call,
   * a description like "closed healthcare claim from January 2026" must match one of the caller's claims;
   * no "once you're verified" wording, no claim that an email was sent unless it was;
   * a claim conversation may not end with a goodbye before the email summary was offered.
-* Then the guard's scope check (`judge_reply`) on every draft that passed the checks above.
+* Every phase: a reply that asks for more identity details after the guard heard three, while
+  `verify_identity` was not tried this turn, is sent back (`missed_verification`).
+* Then the guard's full review (`judge_reply`) on every draft that passed the checks above.
 
 ## 7. State and persistence
 

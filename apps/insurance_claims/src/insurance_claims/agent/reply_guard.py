@@ -15,9 +15,15 @@ What is checked, and why:
   - a passed appeal deadline must not be described as open, and the stated status must match;
   - the reply must not say verification is pending, or that an email was sent when it was not;
   - a claim conversation may not end without offering the email summary (POST_PROCESS).
-* Scope, for every reply that passes the checks above: the guard model (``agent/guard.py``)
-  judges whether the reply stays within claims support (for example, it must not explain
-  reinforcement learning). No verdict counts as a problem, so the reply is never sent unchecked.
+* The guard's review, for every reply that passes the checks above, in every phase: the guard
+  model (``agent/guard.py``) checks each claim fact against the record, the claim tool results
+  of this turn, and the caller's words (for example "the pathology report is on file" when it is
+  still required), and also checks for disclosure before verification, promises or invented
+  actions, out-of-scope help, and internal details. No verdict counts as a problem, so a reply is
+  never sent unreviewed.
+
+The code checks come first because they are exact and cannot be argued with; the guard covers
+what only language understanding can catch.
 
 The low-level checks live in :mod:`insurance_claims.agent.guardrails`; this module applies
 them with the session's context.
@@ -27,7 +33,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from typing import Callable
+from typing import Any, Callable
 
 from insurance_claims.agent.guard import Guard
 from insurance_claims.agent.guardrails import (
@@ -84,6 +90,7 @@ class ReplyGuard:
         secret_tokens: list[str],
         today: Callable[[], date],
         guard: Guard,
+        followup_rules: tuple[Any, ...] = (),
     ) -> None:
         self.claims = claims
         self.guidelines = guidelines
@@ -91,26 +98,89 @@ class ReplyGuard:
         self.secret_tokens = secret_tokens
         self.today = today
         self.guard = guard
+        self.followup_rules = followup_rules
 
     def check(self, text: str, state: SessionState, effects: TurnEffects) -> list[str]:
         """Return the problems with ``text`` (empty when the reply may be sent)."""
         if not text.strip():
             return ["the reply was empty"]
         problems = self._code_checks(text, state, effects)
-        return problems or self._scope_check(text, state)
+        return problems or self._guard_review(text, state, effects)
 
-    def _scope_check(self, text: str, state: SessionState) -> list[str]:
-        caller_message = next((m.text for m in reversed(state.history) if m.role == "user"), "")
-        verdict = self.guard.judge_reply(caller_message=caller_message, reply=text)
+    def _guard_review(self, text: str, state: SessionState, effects: TurnEffects) -> list[str]:
+        transcript = [
+            {"speaker": "caller" if m.role == "user" else "representative", "text": m.text} for m in state.messages_since_reset()[-12:]
+        ]
+        verdict = self.guard.judge_reply(
+            transcript=transcript,
+            reply=text,
+            verified=state.verified,
+            record=self._record(state),
+            tool_results=effects.tool_results,
+            application_state=self._application_state(state, effects),
+        )
         if verdict is None:
-            return ["scope_unchecked: the reply could not be reviewed; write it again"]
+            return ["reply_unreviewed: the reply could not be reviewed; write it again"]
         if verdict.allowed:
             return []
-        details = "; ".join(verdict.problems) or "it goes beyond insurance claims support"
-        return [f"out_of_scope: {details}. Do not answer unrelated requests; decline in one sentence and steer back to the claim"]
+        if not verdict.problems:
+            return ["guard_blocked: the reply was not allowed; keep to the claim record and the caller's words"]
+        return [f"{p.category}: {p.detail}" for p in verdict.problems]
+
+    @staticmethod
+    def _application_state(state: SessionState, effects: TurnEffects) -> dict[str, Any]:
+        """Actions the application has really taken, so the guard can tell a true statement from an invented one."""
+        email = state.email
+        return {
+            "human_follow_up_requested": state.handoff.requested,
+            "human_offered": state.handoff.offered,
+            "email_summary": {
+                "status": email.status,
+                "prepared_and_shown_with_send_and_skip_buttons": email.status == "offered",
+                "goes_to": "the email address on file",
+                "decision_recorded_this_turn": effects.email_decision,
+            },
+        }
+
+    def _guidance(self, packet: Any, claim: Any) -> list[str]:
+        """Every approved guidance text for the selected claim; statements based on them are supported."""
+        texts = [d.get(k) or "" for d in packet.documents for k in ("guidance", "alternative")]
+        texts += [packet.case_type_guidance or "", packet.default_guidance, packet.default_alternative or ""]
+        texts += [packet.processing_time or "", packet.human_review_rule or "", packet.fallback_followup]
+        texts += [self.guidelines.render_followup(rule, claim) for rule in self.followup_rules]
+        return [t for t in texts if t]
+
+    def _record(self, state: SessionState) -> dict[str, Any] | None:
+        """What the guard may treat as true: nothing before verification; afterwards the caller's claims."""
+        if not state.verified:
+            return None
+        claims = self.claims.list_for_party(state.verification.party_id or "")
+        record: dict[str, Any] = {
+            "today": self.today().isoformat(),
+            "claims_on_account": [
+                {"case_id": c.case_id, "case_type": c.case_type, "created_at": c.created_at.isoformat(), "status": c.status} for c in claims
+            ],
+            "selected_claim": None,
+        }
+        selected = next((c for c in claims if c.case_id == state.case.case_id), None)
+        if selected is not None:
+            packet = build_case_evidence(selected, self.guidelines, self.schema_doc, today=self.today())
+            recorded = state.documents.get(selected.case_id, {})
+            record["selected_claim"] = {
+                **packet.case,
+                "appeal_deadline_status": packet.deadline,
+                "document_status": {doc: recorded.get(doc, "unknown") for doc in selected.documents_needed},
+                "approved_guidance": self._guidance(packet, selected),
+            }
+        return record
 
     def _code_checks(self, text: str, state: SessionState, effects: TurnEffects) -> list[str]:
         problems = [f"{v.code}: {v.detail}" for v in check_style(text) + check_internal_reference(text)]
+        if self._skipped_verification(state, effects):
+            problems.append(
+                "missed_verification: the caller has already given three identity details; "
+                "call verify_identity with every detail they gave before replying, instead of asking for more"
+            )
         if not state.verified:
             if check_pre_verification_leak(text, self.secret_tokens):
                 problems.append("it contains claim information but the caller is not verified")
@@ -133,6 +203,16 @@ class ReplyGuard:
         return problems
 
     # ------------------------------------------------------------------ individual rules
+    @staticmethod
+    def _skipped_verification(state: SessionState, effects: TurnEffects) -> bool:
+        """The guard heard three identity details from the account holder, but the agent never tried to verify."""
+        review = effects.caller_review
+        if review is None or state.verified or state.phase != Phase.VERIFY_ID or "verify_identity" in effects.tools_called:
+            return False
+        if state.verification.status == "locked" or state.verification.representative_declared or review.speaker != "account_holder":
+            return False
+        return len(set(review.identity_fields_given) - {"policy_number"}) >= 3
+
     @staticmethod
     def _ends_without_email_offer(text: str, state: SessionState, effects: TurnEffects) -> bool:
         return (

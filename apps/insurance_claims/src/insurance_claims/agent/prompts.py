@@ -42,7 +42,7 @@ class PromptError(RuntimeError):
 
 
 REQUIRED_PHASES: tuple[str, ...] = ("VERIFY_ID", "RESOLVE_INTENT", "PROCESS_CASE", "POST_PROCESS")
-GUARD_TASKS: tuple[str, ...] = ("guard_caller", "guard_consent", "guard_summary", "guard_reply")
+GUARD_TASKS: tuple[str, ...] = ("guard_caller", "guard_consent", "guard_summary", "guard_document", "guard_reply")
 REQUIRED_TASKS: tuple[str, ...] = ("agent", *GUARD_TASKS)
 KNOWN_PHASES: frozenset[str] = frozenset(p.value for p in Phase)
 MAX_PROMPT_FILE_BYTES = 512 * 1024

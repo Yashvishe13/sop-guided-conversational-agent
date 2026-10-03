@@ -164,6 +164,14 @@ class SessionState(_Model):
     phase_log: list[PhaseTransition] = Field(default_factory=list)
     closed: bool = False
 
+    def last_reset_turn(self) -> int:
+        """Turn of the latest identity reset (-1 if none). Messages before it are never shown to a model again."""
+        return max((t.turn_index for t in self.phase_log if t.reason in RESET_REASONS), default=-1)
+
+    def messages_since_reset(self) -> list[ChatMessage]:
+        floor = self.last_reset_turn()
+        return [m for m in self.history if m.turn_index >= floor]
+
     @property
     def verified(self) -> bool:
         return self.verification.status == "verified" and self.verification.party_id is not None
@@ -195,5 +203,8 @@ class SessionState(_Model):
             view["case"] = {"case_id": self.case.case_id}
         return view
 
+
+RESET_REASONS = frozenset({"verification_expired", "caller_changed"})
+"""Phase changes after which earlier messages no longer belong to the current, verified caller."""
 
 _EMAIL_FINAL = frozenset({"sent", "queued", "skipped", "failed", "delivery_unknown", "needs_human"})

@@ -21,7 +21,12 @@ fail closed when it gives no clear verdict:
   account holder (not someone acting for another person, not unclear);
 * ``record_email_decision`` is recorded only when the guard reads the same choice in the
   caller's own words;
-* ``offer_email_summary`` is offered only when the guard finds every statement supported.
+* ``offer_email_summary`` is offered only when the guard finds every statement supported;
+* ``record_document_status`` stores a status only when the guard reads the same status in the
+  caller's own words.
+
+Results of the claim tools are also kept for the turn (``TurnEffects.tool_results``) so the
+guard can fact check the reply against exactly what the agent read.
 """
 
 from __future__ import annotations
@@ -274,6 +279,15 @@ class TurnEffects:
     evidence: list[EvidencePacket] = field(default_factory=list)
     fetched_case_ids: set[str] = field(default_factory=set)
     claims_listed: bool = False
+    tool_results: list[dict[str, Any]] = field(default_factory=list)
+    tools_called: set[str] = field(default_factory=set)
+    caller_review: CallerReview | None = None
+    """This turn's guard review of the caller (also used by the reply checks)."""
+    """Successful tool outputs this turn (lookups and actions taken): the evidence the guard checks the reply against."""
+
+
+# verify_identity results stay out of the guard's evidence: they concern identity, not the claim.
+_NOT_EVIDENCE = frozenset({"verify_identity"})
 
 
 class ToolExecutor:
@@ -314,7 +328,7 @@ class ToolExecutor:
         self.guard = guard
         self.caller_review = caller_review
         """This turn's guard review of the caller (None when the guard gave no verdict)."""
-        self.effects = TurnEffects()
+        self.effects = TurnEffects(caller_review=caller_review)
         self.calls: list[dict[str, Any]] = []
         self._seen: dict[str, int] = {}
 
@@ -325,6 +339,9 @@ class ToolExecutor:
             node["output"] = {"ok": result.ok, "status": result.output.get("status") or result.output.get("error")}
             node["metadata"] = {"phase": self.state.phase.value}
             self.calls.append({"name": name, "ok": result.ok, "status": node["output"]["status"]})
+            self.effects.tools_called.add(name)
+            if result.ok and name not in _NOT_EVIDENCE:
+                self.effects.tool_results.append({"tool": name, "result": result.output})
             return result
 
     def _dispatch(self, name: str, arguments: str) -> ToolResult:
@@ -618,7 +635,8 @@ class ToolExecutor:
                 "deadline": packet.deadline,
                 "today": packet.today,
                 "field_definitions": packet.field_definitions,
-                "document_status_so_far": {d: docs.get(d, "unknown") for d in claim.documents_needed},
+                "documents_not_yet_received": claim.documents_needed,
+                "what_the_caller_said_about_each_document": {d: docs.get(d, "not discussed yet") for d in claim.documents_needed},
                 "processing_time_after_submission": packet.processing_time,
             },
         )
@@ -679,6 +697,16 @@ class ToolExecutor:
         status = a.get("status")
         if doc is None or status not in DOC_STATUSES:
             return ToolResult("record_document_status", False, {"error": "invalid", "documents_needed": claim.documents_needed})
+        verdict = self.guard.judge_document(document=doc, caller_messages=self.caller_text.splitlines()[-8:])
+        heard = verdict.status if verdict else "no_verdict"
+        tracing.event("guardrail", rule="document_status_check", agent=status, guard=heard, agreed=heard == status)
+        if heard != status:
+            message = (
+                f"The caller's own words indicate '{heard}' for the {doc}, not '{status}'. Record what the caller actually said, or ask them."
+                if verdict
+                else f"The {doc} status could not be confirmed right now. Ask the caller to confirm it."
+            )
+            return ToolResult("record_document_status", False, {"error": "status_not_confirmed", "message": message})
         self.state.documents.setdefault(claim.case_id, {})[doc] = status
         tracing.event("document_status", case_id=claim.case_id, document=doc, status=status)
         return ToolResult("record_document_status", True, {"status": "recorded", "documents": self.state.documents[claim.case_id]})

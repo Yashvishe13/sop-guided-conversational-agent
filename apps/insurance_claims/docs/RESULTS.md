@@ -1,6 +1,6 @@
 # Verification results
 
-Date: 2026-10-04. Version 0.3.0. Model: `gpt-5.6-luna` (Responses API) as both agent and guard. Prompt set `2026-10-04.guard-2`.
+Date: 2026-10-04. Version 0.3.0. Model: `gpt-5.6-luna` (Responses API) as both agent and guard. Prompt set `2026-10-04.guard-7`.
 
 This report covers the sample conversation from `instructions.md`, the safety rules in `plan.md`,
 and how each was verified on the current ReAct agent (see `docs/DESIGN.md`).
@@ -9,9 +9,9 @@ and how each was verified on the current ReAct agent (see `docs/DESIGN.md`).
 
 | Check | How | Result |
 | --- | --- | --- |
-| Unit, chaos, API, privacy suite | `pytest` with the offline fake model and scripted misbehaving models, no network | **1,717 passed** (incl. the external review's reproductions, the agent and the guard under fault injection, and an import check of every module) |
+| Unit, chaos, API, privacy suite | `pytest` with the offline fake model and scripted misbehaving models, no network | **1,735 passed** (incl. the external review's reproductions, the agent and the guard under fault injection, and an import check of every module) |
 | Browser smoke and recovery | Playwright against the real app (`pytest -m browser`) | **9 passed** |
-| Live model evaluation | Scripted multi-turn runs against `gpt-5.6-luna` as agent and guard (`evals/live_eval.py --seeds 3`) | **23 / 23 passed**; 100 guard verdicts, none missing, no legitimate reply blocked |
+| Live model evaluation | Scripted multi-turn runs against `gpt-5.6-luna` as agent and guard (`evals/live_eval.py --seeds 3`) | **24 / 24 passed**; 106 guard verdicts (49 reply reviews), none missing, no legitimate reply blocked |
 | Docker | `docker compose up -d --build`, `/health`, full conversation over HTTP with the real model, trace reader | Pass |
 | Chrome walkthrough | Claude in Chrome against the Docker app with the real model | Pass |
 
@@ -64,6 +64,30 @@ questions about the same claim keep the offer open (switching to another claim s
 it), so "what documents do I still need?" followed by "yes, please email it" sends once, after
 the guard confirms the yes.
 
+### Second review: every reply is fact checked
+
+A follow-up review found that a scripted agent could still say "The pathology report is complete
+and on file" when the record lists it as missing: the code checks match only exact facts (IDs,
+amounts, dates, status, deadline wording), and the guard's reply check was limited to scope. Now
+the guard reviews every reply the agent drafts, in every phase, against the transcript, the
+record (nothing before verification; afterwards the claims on the account, the selected claim,
+what the caller said about each document, and the approved guidance), this turn's tool results,
+and the actions the application really took. It reports `unsupported_fact`,
+`disclosed_before_verification`, `promise_or_invented_action`, `out_of_scope`, or
+`internal_details`. Document statuses are stored only when the guard reads the same status in the
+caller's words, and a reply that asks for more identity details after three were given, without
+trying verification, is sent back.
+
+Tuning against live traces: the first run with the full review passed 24/24 but the guard had
+blocked 13 correct drafts (actions it could not see, such as a prepared summary or a requested
+human, and guidance from earlier turns). Giving it the application state, all of this turn's tool
+results, and the approved guidance, and clarifying offers and refusals in the prompt, brought
+that to zero in the final run, while the scripted tests show false statements are still blocked.
+The same audit found the agent hedging ("the record does not confirm whether it is on file") and
+repeating an internal label; the tool output now states that listed documents have not been
+received, and the deployed app answers "has not been received ... even though your doctor says it
+was sent".
+
 Every guard failure (error, timeout, refusal, invalid or truncated verdict) is treated as "not
 allowed"; `test_guard.py` covers each failure kind and the chaos suite runs 30 seeds with faults
 injected into the guard as well as the agent.
@@ -78,7 +102,7 @@ injected into the guard as well as the agent.
 | Brute force across sessions | Per-policyholder failure ledger, fails closed | `tests/persistence/test_store.py`, `tests/agent/test_agent.py` |
 | Only the policyholder is verified | The guard's caller review gates `verify_identity`; sticky `representative_declared`; hand-over withdraws access | `tests/agent/test_guard.py`, live `third_party_natural` |
 | Early hints remembered and reused | Code stores the claim the guard found in the caller's words, in any phase | `tests/agent/test_guard.py`, live `hint_reuse` |
-| Answers only from the caller's claim and guidelines | Party-scoped tools; reply grounding (IDs, amounts, dates, status, claim descriptions, deadline wording, promises) | `tests/agent/test_guardrails.py`, `tests/agent/test_agent.py` |
+| Answers only from the caller's claim and guidelines | Party-scoped tools; code grounding (IDs, amounts, dates, status, claim descriptions, deadline wording, promises); the guard fact checks every reply against the record, tool results, and actions taken | `tests/agent/test_guard.py`, `tests/agent/test_guardrails.py`, live `document_on_file_question` |
 | Off-topic declined, human after repeats; persuasion before handoff | Guard caller review counts off-topic requests and refusals; guard scope check on replies; `request_human` gate | `tests/agent/test_guard.py`, live `off_topic_loop`, `emotional_refusal` |
 | No em dash or colon | `check_style` on replies and on the email summary | `tests/agent/test_guardrails.py`, `tests/agent/test_agent_chaos.py` |
 | No internal vocabulary (phase names, party IDs, prompt words) | `check_internal_reference` in `ReplyGuard` | `tests/agent/test_agent.py`, `tests/agent/test_guardrails.py` |

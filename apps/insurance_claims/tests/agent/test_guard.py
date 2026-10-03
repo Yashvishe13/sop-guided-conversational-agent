@@ -28,7 +28,8 @@ SUMMARY = (
 
 
 class GuardStub:
-    """A guard transport: per-task verdicts (a dict, a list consumed in order, or an exception); other tasks use the offline guard."""
+    """A guard transport: per-task verdicts (a dict, a list consumed in order, a function of the payload,
+    or an exception); other tasks use the offline guard."""
 
     model_name = "guard-stub"
 
@@ -43,6 +44,8 @@ class GuardStub:
         planned = self.verdicts.get(task)
         if isinstance(planned, list):
             planned = planned.pop(0) if planned else None
+        if callable(planned) and not isinstance(planned, Exception):
+            planned = planned(json.loads(kwargs["input"][0]["content"]))
         if isinstance(planned, Exception):
             raise planned
         if planned is None:
@@ -358,7 +361,18 @@ def test_shipped_guard_prompts_state_their_rules() -> None:
     summary = prompts.guard_instructions("guard_summary").lower()
     assert "says a document was submitted" in summary and "passed appeal deadline" in summary
     reply = prompts.guard_instructions("guard_reply").lower()
-    assert "reinforcement learning" in reply and "reveals internal workings" in reply
+    for phrase in (
+        "[unsupported_fact]",
+        "on file",
+        "[disclosed_before_verification]",
+        "[promise_or_invented_action]",
+        "reinforcement learning",
+        "[internal_details]",
+    ):
+        assert phrase in reply, phrase
+    assert "factual accuracy" not in reply  # the review checks claim facts itself
+    document = prompts.guard_instructions("guard_document").lower()
+    assert '"already_sent"' in document and "only what the caller actually said" in document
 
 
 def test_demo_conversation_runs_with_the_offline_guard(harness):
@@ -380,3 +394,132 @@ def test_a_question_about_the_same_claim_keeps_the_offer_open_for_a_later_yes(ha
     model.responses += [call("record_email_decision", decision="send")]
     h.say("Okay, yes please, email me the summary.")
     assert h.state.email.status == "queued"
+
+
+# ---------------------------------------------------------------------- every reply is fact checked (second review)
+
+VERIFY_AND_LOAD = (call("verify_identity", **IDENTITY), call("select_claim", case_id="CL-2048"), call("get_claim_details"))
+
+
+def test_reply_saying_a_missing_document_is_on_file_is_blocked(harness):
+    false = "The pathology report is complete and on file, so your claim CL-2048 has everything it needs."
+    fixed = "Your claim CL-2048 still needs the pathology report and the office note. Can you request them from your provider?"
+    model = Scripted(*VERIFY_AND_LOAD, say(false), say(fixed))
+    h = harness(model=model, guard_model=GuardStub())
+    payload = h.say("My name is Margaret Chen, DOB 1985-03-15, SSN last four 4472.")
+    assert h.last_reply(payload) == fixed
+    feedback = [i for i in model.requests[-1]["input"] if i.get("role") == "developer"]
+    assert "unsupported_fact" in feedback[-1]["content"]
+
+
+@pytest.mark.parametrize(
+    "false",
+    [
+        "We've received your office note, so only the pathology report is left.",
+        "Good news, the reviewer already looked at the pathology report.",
+        "Once you send the report, your claim will be reopened automatically.",
+    ],
+)
+def test_any_claim_statement_the_guard_finds_unsupported_is_blocked(harness, false):
+    fixed = "Your claim CL-2048 still needs the pathology report and the office note."
+    model = Scripted(*VERIFY_AND_LOAD, say(false), say(fixed))
+
+    def review(payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["reply"] == false:
+            return {"allowed": False, "problems": [{"category": "unsupported_fact", "detail": "the record shows otherwise"}]}
+        return {}
+
+    h = harness(model=model, guard_model=GuardStub(guard_reply=review))
+    assert h.last_reply(h.say("My name is Margaret Chen, DOB 1985-03-15, SSN last four 4472.")) == fixed
+
+
+def test_guard_blocks_disclosure_before_verification_that_code_cannot_see(harness):
+    hint = "I can see a claim from January under that name, but I need to verify you first."
+    safe = "I'll look into it right after we verify you. Could you share your full name and date of birth?"
+    model = Scripted(say(hint), say(safe))
+    verdict = {"allowed": False, "problems": [{"category": "disclosed_before_verification", "detail": "confirms a claim exists"}]}
+    h = harness(model=model, guard_model=GuardStub(guard_reply=[verdict, {}]))
+    assert h.last_reply(h.say("Is there a claim under Margaret Chen?")) == safe
+
+
+def test_every_reply_is_reviewed_in_every_phase_with_the_right_evidence(harness):
+    model = Scripted(say("Could you share your full name, date of birth, and the last four of your SSN?"))
+    guard = GuardStub()
+    h = harness(model=model, guard_model=guard)
+    h.say("Hi, I have a question about my claim.")
+    model.responses += [
+        *VERIFY_AND_LOAD,
+        say("You're verified. Claim CL-2048 was denied because the pathology report and office note were missing."),
+    ]
+    h.say("My name is Margaret Chen, DOB 1985-03-15, SSN last four 4472.")
+    model.responses += [call("offer_email_summary", summary=SUMMARY), say("I've prepared a summary. Would you like it emailed?")]
+    h.say("That's all.")
+    reviews = [json.loads(r["input"][0]["content"]) for r in guard.requests if r["task"] == "guard_reply"]
+    assert len(reviews) == 3  # one per reply, VERIFY_ID, PROCESS_CASE, POST_PROCESS
+    assert reviews[0]["caller_verified"] is False and reviews[0]["record"] is None
+    selected = reviews[1]["record"]["selected_claim"]
+    assert selected["case_id"] == "CL-2048" and set(selected["document_status"].values()) == {"unknown"}
+    assert {r["tool"] for r in reviews[1]["tool_results"]} >= {"select_claim", "get_claim_details"}
+    assert reviews[2]["record"]["selected_claim"]["case_id"] == "CL-2048"
+    assert any("upload" in g.lower() or "portal" in g.lower() for g in selected["approved_guidance"])
+    # actions really taken are evidence too, so "I've prepared a summary" is not mistaken for an invented action
+    assert reviews[2]["application_state"]["email_summary"]["prepared_and_shown_with_send_and_skip_buttons"] is True
+    assert "offer_email_summary" in {r["tool"] for r in reviews[2]["tool_results"]}
+    assert reviews[0]["application_state"]["human_follow_up_requested"] is False
+    assert all("verify_identity" not in {r["tool"] for r in review["tool_results"]} for review in reviews)
+
+
+# ---------------------------------------------------------------------- document status comes from the caller's words
+
+
+def test_document_status_the_caller_did_not_state_is_not_stored(harness):
+    model = Scripted(*VERIFY_AND_LOAD, say("You're verified."))
+    h = harness(model=model, guard_model=GuardStub())
+    h.say("My name is Margaret Chen, DOB 1985-03-15, SSN last four 4472.")
+    model.responses += [
+        call("record_document_status", document="pathology report", status="already_sent"),
+        say("Thanks. Can you request it from your provider?"),
+    ]
+    h.say("I can ask my doctor for the pathology report.")
+    out = model.outputs()[0]
+    assert out["error"] == "status_not_confirmed" and "can_request" in out["message"]
+    assert h.state.documents.get("CL-2048", {}).get("original pathology report") is None
+
+
+def test_document_status_the_caller_stated_is_stored(harness):
+    model = Scripted(*VERIFY_AND_LOAD, say("You're verified."))
+    h = harness(model=model, guard_model=GuardStub())
+    h.say("My name is Margaret Chen, DOB 1985-03-15, SSN last four 4472.")
+    model.responses += [call("record_document_status", document="pathology report", status="can_request"), say("Great, please request it.")]
+    h.say("I can ask my doctor for the pathology report.")
+    assert "can_request" in h.state.documents["CL-2048"].values()
+
+
+def test_no_document_verdict_means_nothing_is_stored(harness):
+    model = Scripted(*VERIFY_AND_LOAD, say("You're verified."))
+    h = harness(model=model, guard_model=GuardStub(guard_document=LLMError("timeout", "slow")))
+    h.say("My name is Margaret Chen, DOB 1985-03-15, SSN last four 4472.")
+    model.responses += [call("record_document_status", document="pathology report", status="can_request"), say("Could you confirm that?")]
+    h.say("I can ask my doctor for the pathology report.")
+    assert model.outputs()[0]["error"] == "status_not_confirmed" and not h.state.documents.get("CL-2048")
+
+
+def test_asking_for_more_details_instead_of_verifying_is_blocked(harness):
+    model = Scripted(
+        say("Thanks. Could you also give me the phone number on file?"),
+        call("verify_identity", **IDENTITY),
+        call("select_claim", case_id="CL-2048"),
+        say("You're verified, Margaret."),
+    )
+    h = harness(model=model, guard_model=GuardStub())
+    payload = h.say("My name is Margaret Chen, DOB 1985-03-15, SSN last four 4472.")
+    assert h.state.verified and h.last_reply(payload) == "You're verified, Margaret."
+    feedback = [i for i in model.requests[1]["input"] if i.get("role") == "developer"]
+    assert "missed_verification" in feedback[-1]["content"]
+
+
+def test_two_details_may_be_followed_by_a_request_for_a_third(harness):
+    model = Scripted(say("Thanks. Could you also give me the last four digits of your SSN?"))
+    h = harness(model=model, guard_model=GuardStub())
+    payload = h.say("My name is Margaret Chen, DOB 1985-03-15.")
+    assert h.last_reply(payload) == "Thanks. Could you also give me the last four digits of your SSN?"

@@ -55,7 +55,6 @@ from insurance_claims.persistence.store import (
 
 logger = logging.getLogger(__name__)
 
-_RESET_REASONS = frozenset({"verification_expired", "caller_changed"})
 """Phase-log reasons that end a verified epoch: earlier messages are no longer shown."""
 _PURGE_INTERVAL = timedelta(hours=1)
 _ABANDONED_OP_GRACE = timedelta(minutes=5)
@@ -204,8 +203,7 @@ class ConversationService:
                 view.email = EmailOffer(send_count=view.email.send_count)
             view.phase = Phase.VERIFY_ID
             return view, state.turn_index + 1
-        floor = max((t.turn_index for t in state.phase_log if t.reason in _RESET_REASONS), default=0)
-        return state, floor
+        return state, max(state.last_reset_turn(), 0)
 
     # ------------------------------------------------------------------ payloads
     def _session_payload(self, session_id: str, secret: str, state: SessionState) -> dict[str, Any]:

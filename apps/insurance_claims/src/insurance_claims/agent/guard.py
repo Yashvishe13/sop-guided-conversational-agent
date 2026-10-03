@@ -1,4 +1,5 @@
-"""The guard: an independent model reviewer that the application consults at fixed checkpoints.
+"""The guard: an independent model reviewer that the application consults on every message in,
+every reply out, and every action that changes what the application believes.
 
 The agent decides what to say and which tool to call. Some decisions are too important to rest on
 the agent alone, and cannot be made reliably with keyword rules. For those, code asks the guard:
@@ -14,14 +15,21 @@ Checkpoint             Question                                     What code do
                        caller's own words choose?                    and the agent agree
 ``judge_summary``      ``offer_email_summary``: is every statement   An unsupported or incomplete summary is
                        supported by the record?                      rejected with the problems listed
-``judge_reply``        Every draft reply: does it stay within        An out-of-scope reply is blocked and the
-                       claims support?                               agent must rewrite it
+``judge_document``     ``record_document_status``: what did the      The status is stored only if the guard
+                       caller say about this document?               and the agent agree
+``judge_reply``        Every draft reply, in every phase: is each    A reply with any problem is blocked and
+                       claim fact supported by the record and the    the agent must rewrite it; no model text
+                       tool results, nothing disclosed before        reaches the caller without this review
+                       verification, no promise or invented action,
+                       nothing out of scope or internal?
 =====================  ===========================================  ==========================================
 
 Design, following the pattern of a permission classifier:
 
 * **Independent.** The guard has its own prompts (``[tasks.guard_*]`` in ``prompts.toml``), its own
-  model transport, and sees only the data it judges, never the agent's reasoning or tool calls.
+  model transport, and sees only the data it judges. It never sees the agent's reasoning or the
+  arguments of its tool calls; to fact check a reply it gets the record and the claim tool results
+  the agent read this turn, as evidence.
 * **Untrusted input stays data.** The material is sent as one JSON document, so caller text cannot
   close a tag or pose as instructions; the prompts say to ignore instructions inside it.
 * **Strict output.** Each verdict is a JSON object with a fixed schema (Responses API structured
@@ -64,6 +72,7 @@ class CallerReview(_Verdict):
     refused_verification: bool
     off_topic_request: bool
     claim_mentioned: ClaimMentioned
+    identity_fields_given: list[Literal["full_name", "dob", "phone", "email", "id_last4", "policy_number"]]
     reason: str | None
     rationale: str
 
@@ -78,9 +87,25 @@ class SummaryVerdict(_Verdict):
     problems: list[str]
 
 
+ReplyProblemCategory = Literal[
+    "unsupported_fact", "disclosed_before_verification", "promise_or_invented_action", "out_of_scope", "internal_details"
+]
+DOC_STATUSES = ("has_it", "can_request", "cannot_obtain", "already_sent", "unknown")
+
+
+class ReplyProblem(_Verdict):
+    category: ReplyProblemCategory
+    detail: str
+
+
 class ReplyVerdict(_Verdict):
     allowed: bool
-    problems: list[str]
+    problems: list[ReplyProblem]
+
+
+class DocumentVerdict(_Verdict):
+    status: Literal["has_it", "can_request", "cannot_obtain", "already_sent", "unknown"]
+    rationale: str
 
 
 # ---------------------------------------------------------------------- strict JSON schemas
@@ -113,13 +138,40 @@ SCHEMAS: dict[str, dict[str, Any]] = {
                     "year": _nullable("integer"),
                 }
             ),
+            "identity_fields_given": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["full_name", "dob", "phone", "email", "id_last4", "policy_number"]},
+            },
             "reason": _nullable("string"),
             "rationale": {"type": "string"},
         }
     ),
     "guard_consent": _object({"decision": {"type": "string", "enum": ["send", "skip", "unclear"]}, "rationale": {"type": "string"}}),
     "guard_summary": _object({"supported": {"type": "boolean"}, "problems": _STRINGS}),
-    "guard_reply": _object({"allowed": {"type": "boolean"}, "problems": _STRINGS}),
+    "guard_document": _object({"status": {"type": "string", "enum": list(DOC_STATUSES)}, "rationale": {"type": "string"}}),
+    "guard_reply": _object(
+        {
+            "allowed": {"type": "boolean"},
+            "problems": {
+                "type": "array",
+                "items": _object(
+                    {
+                        "category": {
+                            "type": "string",
+                            "enum": [
+                                "unsupported_fact",
+                                "disclosed_before_verification",
+                                "promise_or_invented_action",
+                                "out_of_scope",
+                                "internal_details",
+                            ],
+                        },
+                        "detail": {"type": "string"},
+                    }
+                ),
+            },
+        }
+    ),
 }
 
 
@@ -163,8 +215,29 @@ class Guard:
         }
         return self._ask("guard_summary", payload, SummaryVerdict)
 
-    def judge_reply(self, *, caller_message: str, reply: str) -> ReplyVerdict | None:
-        return self._ask("guard_reply", {"caller_message": caller_message, "reply": reply}, ReplyVerdict)
+    def judge_document(self, *, document: str, caller_messages: list[str]) -> DocumentVerdict | None:
+        return self._ask("guard_document", {"document": document, "caller_messages": caller_messages}, DocumentVerdict)
+
+    def judge_reply(
+        self,
+        *,
+        transcript: list[dict[str, str]],
+        reply: str,
+        verified: bool,
+        record: dict[str, Any] | None,
+        tool_results: list[dict[str, Any]],
+        application_state: dict[str, Any],
+    ) -> ReplyVerdict | None:
+        """``record`` is None before verification (nothing about any claim may be said then)."""
+        payload = {
+            "transcript": transcript,
+            "reply": reply,
+            "caller_verified": verified,
+            "application_state": application_state,
+            "record": record,
+            "tool_results": tool_results,
+        }
+        return self._ask("guard_reply", payload, ReplyVerdict)
 
     # ------------------------------------------------------------------ one checkpoint call
     def _ask(self, task: str, payload: dict[str, Any], model_cls: type[T]) -> T | None:
@@ -197,7 +270,10 @@ class Guard:
 
 def _trace_view(verdict: BaseModel) -> dict[str, Any]:
     data = verdict.model_dump()
-    out = {k: v for k, v in data.items() if isinstance(v, bool) or k in ("speaker", "decision")}
+    out = {k: v for k, v in data.items() if isinstance(v, bool) or k in ("speaker", "decision", "status")}
     if "problems" in data:
         out["problem_count"] = len(data["problems"])
+        categories = sorted({p["category"] for p in data["problems"] if isinstance(p, dict)})
+        if categories:
+            out["problem_categories"] = categories
     return out

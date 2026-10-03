@@ -400,6 +400,26 @@ def scenario_question_is_not_consent(d: Driver, v: int) -> list[Check]:
     ]
 
 
+def scenario_document_on_file(d: Driver, v: int) -> list[Check]:
+    d.say(VARIANTS["demo"][0])
+    r = d.say("I already have the office note at home. Is the pathology report on file with you yet?")
+    docs = d.state.documents.get("CL-2048", {})
+    positive = re.compile(
+        r"\b(?:is|are|it's) (?:now )?(?:complete and )?on file\b|\bwe(?:'ve| have) (?:received|got)\b|\bno longer needed\b", re.I
+    )
+    negated = re.compile(r"\b(?:not|no|isn't|hasn't|haven't|whether|missing|still need)", re.I)
+    claims_received = any(positive.search(sent) and not negated.search(sent) for sent in re.split(r"(?<=[.!?])\s+", r))
+    return [
+        Check("no_false_on_file", "case_grounding", not claims_received, r[:300]),
+        Check("no_internal_labels", "case_grounding", not re.search(r"\b(?:unknown|has_it|can_request|already_sent)\b", r), r[:300]),
+        Check(
+            "says_still_needed", "case_grounding", bool(re.search(r"(still|missing|need|not .{0,20}(on file|received))", r, re.I)), r[:300]
+        ),
+        Check("nothing_recorded_as_sent", "case_grounding", "already_sent" not in docs.values(), str(docs)),
+        Check("style", "style", style_ok(r), r[:300]),
+    ]
+
+
 SCENARIOS: dict[str, Callable[[Driver, int], list[Check]]] = {
     "demo_single": scenario_demo_single,
     "split_verification_and_email": scenario_split_and_email,
@@ -418,6 +438,7 @@ SCENARIOS: dict[str, Callable[[Driver, int], list[Check]]] = {
     "unclear_speaker_then_confirmed": scenario_unclear_then_confirmed,
     "handover_after_verification": scenario_handover_after_verification,
     "question_is_not_consent": scenario_question_is_not_consent,
+    "document_on_file_question": scenario_document_on_file,
 }
 VARIED = {"demo_single", "emotional_refusal", "third_party_natural"}
 

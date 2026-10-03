@@ -64,9 +64,6 @@ HISTORY_MESSAGES = 24
 """Most recent chat messages replayed to the model each turn."""
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-# Phase changes after which earlier messages are hidden from the model and from identity
-# grounding (the old verification no longer applies, so neither does what was said for it).
-_RESET_REASONS = ("verification_expired", "caller_changed")
 
 
 # ---------------------------------------------------------------------- fixed texts
@@ -179,6 +176,7 @@ class ClaimsAgent:
             secret_tokens=secret_claim_tokens(self.claims.all_claims_unscoped()),
             today=self.today,
             guard=self.guard,
+            followup_rules=self.followup_rules,
         )
 
     # ------------------------------------------------------------------ public interface
@@ -441,27 +439,18 @@ class ClaimsAgent:
             ctx["caller_first_name"] = self.directory.first_name(state.verification.party_id or "")
             ctx["selected_claim"] = state.case.case_id
             if state.case.case_id:
-                ctx["document_status"] = state.documents.get(state.case.case_id, {})
+                ctx["what_the_caller_said_about_documents"] = state.documents.get(state.case.case_id, {})
             ctx["email_offer"] = state.email.status
         return ctx
 
     def _transcript(self, state: SessionState) -> list[dict[str, str]]:
         """The conversation since the last identity reset, for the guard's caller review."""
-        floor = self._history_floor(state)
-        recent = [m for m in state.history if m.turn_index >= floor][-HISTORY_MESSAGES:]
+        recent = state.messages_since_reset()[-HISTORY_MESSAGES:]
         return [{"speaker": "caller" if m.role == "user" else "representative", "text": m.text} for m in recent]
-
-    def _history_floor(self, state: SessionState) -> int:
-        """Turn index of the last verification reset; earlier messages are not used."""
-        for t in reversed(state.phase_log):
-            if t.reason in _RESET_REASONS:
-                return t.turn_index
-        return -1
 
     def _history_items(self, state: SessionState) -> list[dict[str, Any]]:
         """Recent chat as Responses API input. Caller text is wrapped in tags to mark it as untrusted."""
-        floor = self._history_floor(state)
-        recent = [m for m in state.history if m.turn_index >= floor][-HISTORY_MESSAGES:]
+        recent = state.messages_since_reset()[-HISTORY_MESSAGES:]
         return [
             {"role": "user", "content": f"<caller_message>\n{m.text}\n</caller_message>"}
             if m.role == "user"
@@ -471,8 +460,7 @@ class ClaimsAgent:
 
     def _caller_text(self, state: SessionState) -> str:
         """Everything the caller typed since the last reset; identity values must appear here."""
-        floor = self._history_floor(state)
-        return "\n".join(m.text for m in state.history if m.role == "user" and m.turn_index >= floor)
+        return "\n".join(m.text for m in state.messages_since_reset() if m.role == "user")
 
     # ------------------------------------------------------------------ applying the guard's caller review
     def _apply_caller_review(self, state: SessionState, review: CallerReview | None, now: datetime) -> None:

@@ -185,7 +185,7 @@ apps/insurance_claims/
     config.py                     Settings, read from the environment and .env
     agent/                        the ReAct agent
       loop.py                       ClaimsAgent: one turn = guard reviews caller, then model -> tools -> ... -> checked reply
-      guard.py                      Guard: independent model reviewer (speaker, consent, summary facts, reply scope)
+      guard.py                      Guard: independent model reviewer on every message, reply, and stored fact
       tools.py                      tool schemas, per-phase tool menu, ToolExecutor (tool guardrails)
       reply_guard.py                ReplyGuard: checks every draft reply before it is sent
       guardrails.py                 low-level reply checks (style, leaks, grounding, deadlines)

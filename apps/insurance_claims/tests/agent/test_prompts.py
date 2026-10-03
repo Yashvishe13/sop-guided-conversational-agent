@@ -357,7 +357,7 @@ def test_sha256_changes_when_a_guideline_changes(tmp_path: Path) -> None:
 
 
 def test_shipped_agent_prompts_state_the_rules(prompts: PromptSet) -> None:
-    assert set(prompts.tasks) == {"agent", "guard_caller", "guard_consent", "guard_summary", "guard_reply"}
+    assert set(prompts.tasks) == {"agent", "guard_caller", "guard_consent", "guard_summary", "guard_document", "guard_reply"}
     g = prompts.global_guideline.lower()
     for rule in (
         "caller_review",
