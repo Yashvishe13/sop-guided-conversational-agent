@@ -1,0 +1,29 @@
+# docker compose up --build   (run from the repository root)
+# Secrets are read at runtime from your shell or from ./.env and are never baked into the image.
+#   OPENAI_API_KEY        required when MODEL_PROVIDER=openai (the app refuses to start without it);
+#                         leave it empty with MODEL_PROVIDER=fake for the offline demo model.
+#   STATE_ENCRYPTION_KEY  optional: Fernet key for the encrypted session store. When unset, the app
+#                         generates one inside the claims-data volume (fine for a demo). For a real
+#                         deployment, supply it here so the key does not live next to the data. Generate:
+#                         python3 -c "import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())"
+services:
+  claims-agent:
+    build:
+      context: apps/insurance_claims
+    image: insurance-claims-agent:latest
+    ports:
+      - "8000:8000"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.6-luna}
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-openai}
+      EMAIL_TRANSPORT: ${EMAIL_TRANSPORT:-outbox}
+      APP_ENV: ${APP_ENV:-development}
+      APP_TODAY: ${APP_TODAY:-}
+      STATE_ENCRYPTION_KEY: ${STATE_ENCRYPTION_KEY:-}
+    volumes:
+      - claims-data:/data
+    restart: unless-stopped
+
+volumes:
+  claims-data:

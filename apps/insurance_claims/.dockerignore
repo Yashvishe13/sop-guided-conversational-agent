@@ -1,0 +1,12 @@
+.env
+.env.*
+.venv
+data
+traces
+evals/results
+**/__pycache__
+**/*.pyc
+.pytest_cache
+*.sqlite3
+outbox
+tests

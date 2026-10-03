@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <meta name="description" content="Chat with the claims assistant about an existing insurance claim.">
+  <title>Claims support</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#composer-input">Skip to message box</a>
+
+  <div class="shell">
+    <header class="masthead">
+      <div class="masthead__row">
+        <div class="masthead__title">
+          <h1>Claims support</h1>
+          <p class="masthead__sub">We verify your identity before sharing any claim details.</p>
+        </div>
+        <button type="button" id="new-conversation" class="btn btn--quiet">New conversation</button>
+      </div>
+
+      <div class="status-row" id="status-row">
+        <p id="verified-badge" class="badge badge--ok" hidden>
+          <svg class="badge__icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+            <path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span>Identity verified</span>
+        </p>
+        <p id="case-chip" class="badge badge--case" hidden></p>
+      </div>
+
+      <ol id="progress" class="progress" aria-label="Conversation progress">
+        <li class="progress__step is-pending" data-phase="VERIFY_ID">
+          <span class="progress__marker" aria-hidden="true">1</span>
+          <span class="progress__label">Verify identity</span>
+          <span class="progress__status visually-hidden">not started</span>
+        </li>
+        <li class="progress__step is-pending" data-phase="RESOLVE_INTENT">
+          <span class="progress__marker" aria-hidden="true">2</span>
+          <span class="progress__label">Understand request</span>
+          <span class="progress__status visually-hidden">not started</span>
+        </li>
+        <li class="progress__step is-pending" data-phase="PROCESS_CASE">
+          <span class="progress__marker" aria-hidden="true">3</span>
+          <span class="progress__label">Review claim</span>
+          <span class="progress__status visually-hidden">not started</span>
+        </li>
+        <li class="progress__step is-pending" data-phase="POST_PROCESS">
+          <span class="progress__marker" aria-hidden="true">4</span>
+          <span class="progress__label">Wrap up</span>
+          <span class="progress__status visually-hidden">not started</span>
+        </li>
+      </ol>
+    </header>
+
+    <main class="conversation" id="conversation">
+      <div id="handoff-notice" class="notice" role="status" hidden>
+        <svg class="notice__icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+          <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <path d="M8 4.75v4M8 11.1v.15" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>
+        </svg>
+        <p id="handoff-text" class="notice__text"></p>
+      </div>
+
+      <div id="transcript-scroll" class="transcript-scroll" tabindex="0" role="region" aria-label="Messages">
+        <ol id="transcript" class="transcript" role="log" aria-live="polite" aria-relevant="additions" aria-label="Conversation"></ol>
+        <div id="typing" class="typing" hidden>
+          <span class="typing__dots" aria-hidden="true"><span></span><span></span><span></span></span>
+          <span id="typing-text" class="typing__text">Agent is typing</span>
+        </div>
+      </div>
+      <p id="live-status" class="visually-hidden" role="status"></p>
+    </main>
+
+    <footer class="composer-area">
+      <div id="error-banner" class="banner" role="alert" hidden>
+        <p id="error-message" class="banner__text"></p>
+        <div class="banner__actions">
+          <button type="button" id="error-retry" class="btn btn--small btn--primary" hidden>Try again</button>
+          <button type="button" id="error-dismiss" class="btn btn--small btn--quiet">Dismiss</button>
+        </div>
+      </div>
+
+      <form id="composer" class="composer" novalidate>
+        <label for="composer-input" class="visually-hidden">Message</label>
+        <textarea id="composer-input" class="composer__input" name="message" rows="2" maxlength="2000"
+                  placeholder="Type your message" autocomplete="off" spellcheck="true" disabled
+                  aria-describedby="composer-hint char-count"></textarea>
+        <button type="submit" id="send-button" class="btn btn--primary composer__send" disabled>Send</button>
+      </form>
+
+      <div class="composer__meta">
+        <p id="composer-hint" class="composer__hint">Enter sends. Shift+Enter starts a new line.</p>
+        <p id="char-count" class="composer__count" hidden></p>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>
