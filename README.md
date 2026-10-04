@@ -12,6 +12,11 @@ tools per phase, transitions, and which code enforces each rule) and shown in re
 [`docs/DESIGN.md`](apps/insurance_claims/docs/DESIGN.md) explains the architecture and
 [`docs/RESULTS.md`](apps/insurance_claims/docs/RESULTS.md) the verification results.
 
+## Hosted demo
+
+https://98-81-151-1.sslip.io (AWS EC2, real `gpt-5.6-luna`; see [`deploy/ec2`](deploy/ec2/README.md)).
+Follow the walkthrough below in the chat page.
+
 ## Run it (Docker)
 
 Requires Docker with Compose and an OpenAI API key. From this directory:
