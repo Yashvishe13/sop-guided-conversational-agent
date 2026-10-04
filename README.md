@@ -12,7 +12,7 @@ run `docker compose exec claims-agent python -m insurance_claims.agent.sop` whil
 
 ## Hosted demo
 
-https://98-81-151-1.sslip.io (AWS EC2, real `gpt-5.6-luna`).
+https://98-81-151-1.sslip.io (AWS EC2).
 
 ## Run it (Docker)
 
