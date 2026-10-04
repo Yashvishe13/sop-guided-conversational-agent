@@ -16,7 +16,10 @@ from insurance_claims.llm.base import FunctionCall, LLMResponse, LLMUsage, Model
 from insurance_claims.observability import tracing
 
 _NAME = re.compile(r"(?:name is|i'?m|this is)\s+([A-Z][a-z]+\s+[A-Z][a-z]+)")
-_DOB = re.compile(r"\b(19\d\d-\d\d-\d\d)\b")
+_MONTH_NAMES = "january|february|march|april|may|june|july|august|september|october|november|december"
+_DOB = re.compile(
+    rf"\b(19\d\d-\d\d-\d\d|(?:{_MONTH_NAMES})\s+\d{{1,2}}(?:st|nd|rd|th)?,?\s+19\d\d|\d{{1,2}}/\d{{1,2}}/19\d\d)\b", re.IGNORECASE
+)
 _LAST4 = re.compile(r"(?:last\s*(?:4|four)|ssn|social)\D{0,20}(\d{4})\b", re.IGNORECASE)
 _PHONE = re.compile(r"\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}")
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")

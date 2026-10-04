@@ -296,3 +296,15 @@ def test_internal_vocabulary_never_reaches_the_caller(harness):
     assert h.last_reply(payload) == "I still need a couple more details. Could you share your full name and date of birth?"
     feedback = [i for i in model.requests[1]["input"] if i.get("role") == "developer"]
     assert "internal_reference" in feedback[-1]["content"]
+
+
+def test_offline_demo_follows_the_readme_walkthrough(harness):
+    # The root README tells reviewers to type these exact messages; they must work without an API key too.
+    h = harness()
+    h.say("Hi, I'm calling about my denied healthcare claim from January.")
+    h.say("My name is Margaret Chen, date of birth March 15, 1985, SSN last four 4472.")
+    assert h.state.verified and h.state.case.case_id == "CL-2048"
+    h.say("That's all, thanks.")
+    assert h.state.email.status == "offered"
+    h.act("email_send")
+    assert h.state.email.status == "queued"
