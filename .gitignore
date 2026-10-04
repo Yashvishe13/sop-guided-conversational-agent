@@ -28,3 +28,6 @@ build/
 # cloud credentials (never commit)
 .aws/
 *.pem
+
+# hosting runbook for the EC2 demo (kept locally, not part of the submission)
+deploy/

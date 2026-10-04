@@ -14,7 +14,7 @@ tools per phase, transitions, and which code enforces each rule) and shown in re
 
 ## Hosted demo
 
-https://98-81-151-1.sslip.io (AWS EC2, real `gpt-5.6-luna`; see [`deploy/ec2`](deploy/ec2/README.md)).
+https://98-81-151-1.sslip.io (AWS EC2, real `gpt-5.6-luna`).
 Follow the walkthrough below in the chat page.
 
 ## Run it (Docker)
