@@ -351,10 +351,11 @@ def _render(sop: Sop) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     from insurance_claims.agent.tools import SCHEMAS
-    from insurance_claims.config import APP_ROOT
+    from insurance_claims.config import Settings
 
     args = sys.argv[1:] if argv is None else argv
-    sop = load_sop(Path(args[0]) if args else APP_ROOT / "sop.toml", known_tools=SCHEMAS)
+    # The same file the server uses: SOP_PATH if set (the Docker image sets it), else the checkout's sop.toml.
+    sop = load_sop(Path(args[0]) if args else Settings.from_env().sop_path, known_tools=SCHEMAS)
     sys.stdout.write(sop.render_markdown())
     return 0
 

@@ -12,7 +12,9 @@ understanding language (who is speaking, what the caller agreed to, whether a su
 whether a reply is on topic), code asks an independent guard model and refuses unless it allows.
 
 * FastAPI backend with a same-origin HTML/CSS/JavaScript chat UI
+* The SOP as data (`sop.toml`): phase order, tools per phase, every allowed transition, and the code enforcing each rule, validated at startup
 * ReAct agent (Responses API tool loop) whose tool menu changes by phase
+* An independent guard model that reviews every caller message, every reply, and every consent or stored fact, and blocks when unsure
 * Guardrails in code: three-field identity gate, party-scoped claim tools, grounded and style-checked replies, consent-gated email
 * Encrypted, versioned SQLite session memory that survives restarts
 * Consent-gated, idempotent email summary with truthful delivery status
@@ -111,7 +113,7 @@ Set `APP_TODAY=2026-10-03` to freeze the date used for deadline statements.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `OPENAI_API_KEY` | (required for `openai`) | OpenAI token, server side only |
-| `OPENAI_MODEL` | `gpt-5.6-luna` | Model for extraction and drafting |
+| `OPENAI_MODEL` | `gpt-5.6-luna` | Model for the agent and the guard |
 | `MODEL_PROVIDER` | `openai` | `fake` for the offline deterministic model |
 | `OPENAI_REASONING_EFFORT_REPLY` | `low` | Reasoning effort for each agent step |
 | `OPENAI_REASONING_EFFORT_GUARD` | `medium` | Reasoning effort for the guard's verdicts |
@@ -127,6 +129,7 @@ Set `APP_TODAY=2026-10-03` to freeze the date used for deadline statements.
 | `DATA_DIR` | `./data` | SQLite, outbox, key file |
 | `STATE_ENCRYPTION_KEY` | generated `DATA_DIR/state.key` | Fernet key for stored state. Optional for demos; required when `APP_ENV=production`; keep it outside `DATA_DIR` |
 | `TRACES_ENABLED`, `TRACE_DIR` | `true`, `./traces` | Redacted per-turn traces |
+| `SOP_PATH`, `PROMPTS_PATH` | `sop.toml`, `prompts.toml` | The SOP definition and the prompt file |
 | `EMAIL_TRANSPORT` | `outbox` | `outbox` (local demo, never delivered), `smtp`, or `disabled` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_STARTTLS`, `EMAIL_FROM` | | SMTP transport |
 | `APP_ENV` | `development` | `development`, `production`, or `test` |
@@ -139,7 +142,7 @@ Set `APP_TODAY=2026-10-03` to freeze the date used for deadline statements.
 cd apps/insurance_claims
 .venv/bin/python -m pytest                       # unit + chaos + API suite, no network; browser tests excluded
 .venv/bin/python -m pytest -m browser            # only the browser tests (needs: pip install -e ".[browser]" && playwright install chromium)
-RUN_LIVE_EVAL=1 .venv/bin/python -m evals.live_eval --seeds 2   # opt-in, calls the real API
+RUN_LIVE_EVAL=1 PYTHONPATH=src .venv/bin/python -m evals.live_eval --seeds 3   # opt-in, real API (paid), about 15 minutes
 ```
 
 The default run uses `-m 'not browser'` from `pyproject.toml`; passing `-m browser` replaces it.
@@ -158,8 +161,9 @@ no-store` on API paths.
 
 ## Traces
 
-Each turn writes one nested JSON trace to `TRACE_DIR` with phase transitions, guard decisions,
-validated (redacted) proposals, tool calls, token use, retries, and stop reasons. Names, dates of
+Each turn writes one nested JSON trace to `TRACE_DIR` with phase transitions, guardrail decisions,
+the guard's verdicts (flags only, never its free-text reasoning), tool calls, token use, retries,
+and stop reasons. Names, dates of
 birth, contact details, ID digits, claim text, email bodies, and API keys are redacted before
 serialization, and raw prompts and model outputs are never stored.
 
@@ -176,7 +180,7 @@ apps/insurance_claims/
   prompts.toml                    versioned prompts: the agent (one section per phase) and the guard checkpoints
   fixtures/                       demo policyholders, claims, guidelines, claim schema
   Dockerfile
-  evals/live_eval.py              opt-in evaluation against the real model
+  evals/live_eval.py              opt-in evaluation against the real model (last report in evals/results/)
   src/insurance_claims/
     __main__.py                   `python -m insurance_claims` starts uvicorn
     config.py                     Settings, read from the environment and .env
@@ -184,7 +188,7 @@ apps/insurance_claims/
       sop.py                        loads and validates sop.toml; tool menus and the only way the phase changes
       loop.py                       ClaimsAgent: one turn = guard reviews caller, then model -> tools -> ... -> checked reply
       guard.py                      Guard: independent model reviewer on every message, reply, and stored fact
-      tools.py                      tool schemas, per-phase tool menu, ToolExecutor (tool guardrails)
+      tools.py                      tool schemas and ToolExecutor (tool guardrails); the menus come from sop.toml
       reply_guard.py                ReplyGuard: checks every draft reply before it is sent
       guardrails.py                 low-level reply checks (style, leaks, grounding, deadlines)
       prompts.py                    loads and validates prompts.toml
@@ -202,7 +206,7 @@ apps/insurance_claims/
       resilient.py                  bounded retries with backoff, clipped to the turn deadline
       fake.py, chaos.py             offline demo model; fault injection for tests
     mail/sender.py                consent-gated, idempotent email (outbox or SMTP)
-    persistence/store.py          encrypted SQLite store with versions and migrations
+    persistence/store.py          encrypted SQLite store with optimistic versions and turn idempotency
     observability/                redaction, nested JSON traces, trace reader
     web/                          FastAPI app, session service, static chat UI
   tests/                          one folder per package, plus browser tests

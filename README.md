@@ -7,8 +7,8 @@ email summary. It talks naturally, while code and an independent guard model enf
 The app lives in [`apps/insurance_claims`](apps/insurance_claims). Its
 [README](apps/insurance_claims/README.md) has the full configuration, tests, and layout.
 The SOP itself is defined as data in [`sop.toml`](apps/insurance_claims/sop.toml) (phase order,
-tools per phase, transitions, and which code enforces each rule); print it in readable form with
-`python -m insurance_claims.agent.sop` (from `apps/insurance_claims`, with `PYTHONPATH=src`).
+tools per phase, transitions, and which code enforces each rule). To read it as a table per phase,
+run `docker compose exec claims-agent python -m insurance_claims.agent.sop` while the app is running.
 
 ## Hosted demo
 
