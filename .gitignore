@@ -24,3 +24,7 @@ build/
 
 # os
 .DS_Store
+
+# cloud credentials (never commit)
+.aws/
+*.pem
