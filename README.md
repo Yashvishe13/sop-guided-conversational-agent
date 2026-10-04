@@ -1,16 +1,14 @@
 # SOP-guided insurance claims agent
 
-A chat agent that follows the claims support SOP in `instructions.md`: it verifies the caller,
+A chat agent that follows a claims support SOP (standard operating procedure): it verifies the caller,
 works out which claim they mean, explains it from the claim record, and closes with an optional
 email summary. It talks naturally, while code and an independent guard model enforce the rules.
 
 The app lives in [`apps/insurance_claims`](apps/insurance_claims). Its
 [README](apps/insurance_claims/README.md) has the full configuration, tests, and layout.
 The SOP itself is defined as data in [`sop.toml`](apps/insurance_claims/sop.toml) (phase order,
-tools per phase, transitions, and which code enforces each rule) and shown in readable form in
-[`docs/SOP.md`](apps/insurance_claims/docs/SOP.md);
-[`docs/DESIGN.md`](apps/insurance_claims/docs/DESIGN.md) explains the architecture and
-[`docs/RESULTS.md`](apps/insurance_claims/docs/RESULTS.md) the verification results.
+tools per phase, transitions, and which code enforces each rule); print it in readable form with
+`python -m insurance_claims.agent.sop` (from `apps/insurance_claims`, with `PYTHONPATH=src`).
 
 ## Hosted demo
 

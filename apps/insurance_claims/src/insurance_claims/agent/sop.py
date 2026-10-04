@@ -10,7 +10,7 @@ and answers the two questions the agent loop asks on every step:
 
 Each strict rule in the file names the code that enforces it (``enforced_by``). The names must be
 keys of ``ENFORCEMENT_POINTS`` below, and every enforcement point must be named by some rule, so the
-file and the code cannot drift apart silently. ``render_markdown`` produces ``docs/SOP.md``.
+file and the code cannot drift apart silently. ``render_markdown`` gives a readable Markdown view.
 
 Run ``python -m insurance_claims.agent.sop [path]`` to print the SOP as Markdown.
 """
@@ -305,7 +305,7 @@ def _render(sop: Sop) -> str:
         "# Claims support SOP",
         "",
         f"Generated from `sop.toml` (version `{sop.version}`); do not edit by hand.",
-        "Regenerate with `python -m insurance_claims.agent.sop > docs/SOP.md`.",
+        "Print it with `python -m insurance_claims.agent.sop`.",
         "",
         "Workflow: " + " → ".join(p.phase.value for p in sop.phases) + ".",
         "",

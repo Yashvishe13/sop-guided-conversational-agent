@@ -19,8 +19,6 @@ whether a reply is on topic), code asks an independent guard model and refuses u
 * Redacted nested JSON traces per turn and a trace reader
 * Deterministic unit and chaos suite, opt-in live-model evaluation
 
-See [`docs/DESIGN.md`](docs/DESIGN.md) for the architecture and [`docs/RESULTS.md`](docs/RESULTS.md) for verification results.
-
 ## Quick start (Docker)
 
 From the repository root:
@@ -178,9 +176,6 @@ apps/insurance_claims/
   prompts.toml                    versioned prompts: the agent (one section per phase) and the guard checkpoints
   fixtures/                       demo policyholders, claims, guidelines, claim schema
   Dockerfile
-  docs/SOP.md                     the SOP in readable form (generated from sop.toml)
-  docs/DESIGN.md                  architecture and module contracts
-  docs/RESULTS.md                 verification results
   evals/live_eval.py              opt-in evaluation against the real model
   src/insurance_claims/
     __main__.py                   `python -m insurance_claims` starts uvicorn

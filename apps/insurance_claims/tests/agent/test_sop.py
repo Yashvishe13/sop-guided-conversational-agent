@@ -117,10 +117,11 @@ def test_every_rule_names_a_real_enforcement_point_and_every_point_is_used(sop):
     assert named == set(ENFORCEMENT_POINTS)
 
 
-def test_generated_doc_is_up_to_date(sop):
-    assert (APP_ROOT / "docs" / "SOP.md").read_text(encoding="utf-8") == sop.render_markdown(), (
-        "docs/SOP.md is stale: run python -m insurance_claims.agent.sop > docs/SOP.md"
-    )
+def test_markdown_view_covers_every_phase_rule_and_memory_item(sop):
+    text = sop.render_markdown()
+    assert all(f"## {p.phase.value}" in text for p in sop.phases)
+    assert all(r.rule in text for p in sop.phases for r in p.strict)
+    assert all(m.what in text for m in sop.memory)
 
 
 def test_the_running_app_uses_the_sop_file(harness):

@@ -143,6 +143,5 @@ def test_env_example_and_readme_document_the_state_key():
 def test_readme_relative_links_resolve():
     readme = README.read_text(encoding="utf-8")
     targets = re.findall(r"\]\((?!https?://|#)([^)#\s]+)", readme)
-    assert "docs/RESULTS.md" in targets  # the results report stays linked
     missing = [t for t in targets if not (README.parent / t).exists()]
     assert not missing, f"README links to missing files: {missing}"

@@ -7,8 +7,8 @@
 #   * every phase transition: code may only change the phase along a transition listed here.
 # Each strict rule names the code that enforces it ("enforced_by"); an unknown name is a startup
 # error, and so is an enforcement point that no rule mentions. The "flexible" lists record what is
-# deliberately left to the model's judgement. docs/SOP.md is generated from this file
-# (python -m insurance_claims.agent.sop > docs/SOP.md).
+# deliberately left to the model's judgement. Print it in readable form with
+# python -m insurance_claims.agent.sop.
 #
 # Prompt wording for each phase lives in prompts.toml; numeric limits (refusals, off-topic
 # requests, failed attempts, idle time) are settings (see the README).

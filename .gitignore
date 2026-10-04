@@ -31,3 +31,8 @@ build/
 
 # hosting runbook for the EC2 demo (kept locally, not part of the submission)
 deploy/
+
+# working notes, not part of the submission (kept locally)
+apps/insurance_claims/docs/
+instructions.md
+plan.md
