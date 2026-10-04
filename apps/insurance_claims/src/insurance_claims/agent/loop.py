@@ -37,7 +37,8 @@ from insurance_claims.agent.guard import CallerReview, Guard
 from insurance_claims.agent.guardrails import mechanical_style_fix, sanitize_markup
 from insurance_claims.agent.prompts import PromptSet
 from insurance_claims.agent.reply_guard import ReplyGuard
-from insurance_claims.agent.tools import ToolExecutor, tool_names, tool_schemas
+from insurance_claims.agent.sop import Sop, advance
+from insurance_claims.agent.tools import ToolExecutor, tool_schemas
 from insurance_claims.claims.evidence import secret_claim_tokens
 from insurance_claims.claims.fixtures import FixtureBundle
 from insurance_claims.claims.repository import ClaimRepository, GuidelineRepository, PolicyholderDirectory
@@ -48,7 +49,6 @@ from insurance_claims.domain.state import (
     CaseSelection,
     ChatMessage,
     EmailOffer,
-    PhaseTransition,
     SessionState,
     VerificationState,
 )
@@ -149,12 +149,14 @@ class ClaimsAgent:
         prompts: PromptSet,
         model: ModelTransport,
         guard_model: ModelTransport,
+        sop: Sop,
         clock: Callable[[], datetime],
         failure_ledger: Any | None = None,
     ) -> None:
         self.settings = settings
         self.prompts = prompts
         self.model = model
+        self.sop = sop
         self.guard = Guard(
             model=guard_model,
             prompts=prompts,
@@ -253,7 +255,7 @@ class ClaimsAgent:
         state.case = CaseSelection()
         if state.email.status == "offered":
             state.email = EmailOffer(send_count=state.email.send_count)
-        self._transition(state, Phase.VERIFY_ID, "verification_expired", now)
+        self._advance(state, "verification_expired", now)
         return True
 
     def _handle_button(self, state: SessionState, action: str, now: datetime, expired: bool) -> TurnOutcome:
@@ -299,7 +301,7 @@ class ClaimsAgent:
             state=state, now=now, today=self.today(), caller_text=self._caller_text(state),
             directory=self.directory, claims=self.claims, guidelines=self.guidelines, schema_doc=self.schema_doc,
             followup_rules=self.followup_rules, settings=self.settings, failure_ledger=self.failure_ledger,
-            guard=self.guard, caller_review=review,
+            guard=self.guard, caller_review=review, sop=self.sop,
         )  # fmt: skip
         executor.effects.human_offer_due.extend(human_offer_due)
         items = self._history_items(state)
@@ -333,7 +335,7 @@ class ClaimsAgent:
                     task="agent",
                     instructions=self._instructions(state, executor.caller_review, executor.effects.human_offer_due),
                     input=items,
-                    tools=tool_schemas(state),
+                    tools=tool_schemas(self.sop, state),
                     tool_choice="none" if step == MAX_STEPS - 1 else "auto",
                     parallel_tool_calls=True,
                     max_output_tokens=self.settings.max_output_tokens_reply,
@@ -420,7 +422,7 @@ class ClaimsAgent:
             "phase": state.phase.value,
             "verified": state.verified,
             "today": self.today().isoformat(),
-            "tools_available": list(tool_names(state)),
+            "tools_available": list(self.sop.tool_names(state)),
             "caller_review": (
                 {
                     "speaker": "acting_for_someone_else" if state.verification.representative_declared else review.speaker,
@@ -533,7 +535,7 @@ class ClaimsAgent:
         if state.email.status == "offered":
             state.email = EmailOffer(send_count=state.email.send_count)
         tracing.event("guardrail", rule="caller_changed")
-        self._transition(state, Phase.VERIFY_ID, "caller_changed", now)
+        self._advance(state, "caller_changed", now)
 
     # ------------------------------------------------------------------ state helpers
     def _append(self, state: SessionState, role: Literal["user", "assistant"], text: str, now: datetime, kind: str = "chat") -> ChatMessage:
@@ -542,12 +544,8 @@ class ClaimsAgent:
         state.history = state.history[-self.settings.history_limit :]
         return msg
 
-    def _transition(self, state: SessionState, to: Phase, reason: str, now: datetime) -> None:
-        if state.phase == to:
-            return
-        tracing.event("phase_transition", from_phase=state.phase.value, to_phase=to.value, reason=reason)
-        state.phase_log.append(PhaseTransition(turn_index=state.turn_index, from_phase=state.phase, to_phase=to, reason=reason, at=now))
-        state.phase = to
+    def _advance(self, state: SessionState, event: str, now: datetime) -> None:
+        advance(self.sop, state, event, now)
 
 
 def _developer(text: str) -> dict[str, str]:

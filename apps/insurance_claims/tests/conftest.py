@@ -43,6 +43,7 @@ def settings(tmp_path: Path) -> Settings:
         model_provider="fake",
         fixtures_dir=APP_ROOT / "fixtures",
         prompts_path=APP_ROOT / "prompts.toml",
+        sop_path=APP_ROOT / "sop.toml",
         data_dir=tmp_path / "data",
         trace_dir=tmp_path / "traces",
         traces_enabled=True,

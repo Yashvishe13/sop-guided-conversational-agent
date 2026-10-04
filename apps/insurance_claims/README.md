@@ -174,9 +174,11 @@ serialization, and raw prompts and model outputs are never stored.
 ```
 compose.yaml                      (repository root) Docker Compose service and volume
 apps/insurance_claims/
+  sop.toml                        the SOP as data: phase order, tools per phase, transitions, rules and their enforcement
   prompts.toml                    versioned prompts: the agent (one section per phase) and the guard checkpoints
   fixtures/                       demo policyholders, claims, guidelines, claim schema
   Dockerfile
+  docs/SOP.md                     the SOP in readable form (generated from sop.toml)
   docs/DESIGN.md                  architecture and module contracts
   docs/RESULTS.md                 verification results
   evals/live_eval.py              opt-in evaluation against the real model
@@ -184,6 +186,7 @@ apps/insurance_claims/
     __main__.py                   `python -m insurance_claims` starts uvicorn
     config.py                     Settings, read from the environment and .env
     agent/                        the ReAct agent
+      sop.py                        loads and validates sop.toml; tool menus and the only way the phase changes
       loop.py                       ClaimsAgent: one turn = guard reviews caller, then model -> tools -> ... -> checked reply
       guard.py                      Guard: independent model reviewer on every message, reply, and stored fact
       tools.py                      tool schemas, per-phase tool menu, ToolExecutor (tool guardrails)

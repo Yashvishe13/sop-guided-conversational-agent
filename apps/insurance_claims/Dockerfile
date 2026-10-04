@@ -20,6 +20,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     APP_ENV=development \
     FIXTURES_DIR=/app/fixtures \
     PROMPTS_PATH=/app/prompts.toml \
+    SOP_PATH=/app/sop.toml \
     DATA_DIR=/data \
     TRACE_DIR=/data/traces
 RUN groupadd --system app && useradd --system --gid app --home /app --shell /usr/sbin/nologin app
@@ -28,6 +29,7 @@ RUN pip install /wheels/*.whl && rm -rf /wheels
 WORKDIR /app
 COPY fixtures ./fixtures
 COPY prompts.toml ./prompts.toml
+COPY sop.toml ./sop.toml
 RUN mkdir -p /data && chown app:app /data && chmod 700 /data
 USER app
 VOLUME ["/data"]

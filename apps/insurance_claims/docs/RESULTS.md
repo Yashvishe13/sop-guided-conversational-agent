@@ -9,7 +9,7 @@ and how each was verified on the current ReAct agent (see `docs/DESIGN.md`).
 
 | Check | How | Result |
 | --- | --- | --- |
-| Unit, chaos, API, privacy suite | `pytest` with the offline fake model and scripted misbehaving models, no network | **1,741 passed** (incl. the external review's reproductions, the agent and the guard under fault injection, and an import check of every module) |
+| Unit, chaos, API, privacy suite | `pytest` with the offline fake model and scripted misbehaving models, no network | **1,778 passed** (incl. the external review's reproductions, the agent and the guard under fault injection, and an import check of every module) |
 | Browser smoke and recovery | Playwright against the real app (`pytest -m browser`) | **9 passed** |
 | Live model evaluation | Scripted multi-turn runs against `gpt-5.6-luna` as agent and guard (`evals/live_eval.py --seeds 3`) | **24 / 24 passed**; 106 guard verdicts (49 reply reviews), none missing, no legitimate reply blocked |
 | Docker | `docker compose up -d --build`, `/health`, full conversation over HTTP with the real model, trace reader | Pass |
@@ -95,6 +95,15 @@ agent's reply only asked for identity details again. Code now marks a reply as r
 human when the off-topic or refusal limit is reached, when the caller acts for someone else, and
 when verification locks; the guard checks the reply makes the offer, and the fallback reply makes
 it when the agent will not. Tests reproduce the review's three-turn script and cover each trigger.
+
+### The SOP as one file
+
+The workflow used to be spread across code and prompts. It is now defined in `sop.toml` (phase
+order, tools per phase, transitions, strict rules with the code enforcing each, what is left to the
+model, memory across phases), validated at startup and used by the code for tool menus and every
+phase change; `docs/SOP.md` is generated from it. The existing 1,743 tests passed unchanged on the
+SOP-driven code; 44 new tests cover the menus, transitions, refusal of inconsistent SOP files, and
+a disallowed transition aborting the turn without saving it.
 
 Every guard failure (error, timeout, refusal, invalid or truncated verdict) is treated as "not
 allowed"; `test_guard.py` covers each failure kind and the chaos suite runs 30 seeds with faults

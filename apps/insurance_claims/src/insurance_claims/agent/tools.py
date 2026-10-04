@@ -10,9 +10,9 @@ of a tool succeeding:
 * ``offer_email_summary`` accepted      -> PROCESS_CASE   -> POST_PROCESS
 * any claim tool after the offer        -> POST_PROCESS   -> PROCESS_CASE
 
-Which tools the model can see depends on the phase (``tool_schemas``), and the
-executor re-checks the phase anyway, so a hallucinated or out-of-phase call is
-refused with an explanation the model can act on.
+Which tools the model can see in each phase, and every phase transition, come from the SOP
+(``sop.toml`` via ``agent/sop.py``). The executor re-checks the SOP's menu on every call, so a
+hallucinated or out-of-phase call is refused with an explanation the model can act on.
 
 Three tools also consult the guard (``agent/guard.py``), an independent model reviewer, and
 fail closed when it gives no clear verdict:
@@ -39,6 +39,7 @@ from typing import Any, Callable
 
 from insurance_claims.agent.guard import CallerReview, Guard
 from insurance_claims.agent.guardrails import GroundingContext, check_grounding, check_internal_reference, check_style
+from insurance_claims.agent.sop import Sop, SopViolation, advance
 from insurance_claims.claims.evidence import EvidencePacket, build_case_evidence, grounding_tokens
 from insurance_claims.claims.normalize import (
     MONTHS,
@@ -62,7 +63,6 @@ from insurance_claims.domain.state import (
     CaseSelection,
     EmailOffer,
     EmailSummary,
-    PhaseTransition,
     SessionState,
 )
 from insurance_claims.observability import tracing
@@ -217,44 +217,10 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     ),
 }
 
-# ---------------------------------------------------------------------- which tools each phase exposes
-ALWAYS = ("request_human",)
-BY_PHASE: dict[Phase, tuple[str, ...]] = {
-    Phase.VERIFY_ID: ("verify_identity",),
-    Phase.RESOLVE_INTENT: ("list_my_claims", "select_claim"),
-    Phase.PROCESS_CASE: (
-        "list_my_claims",
-        "select_claim",
-        "get_claim_details",
-        "get_document_guidance",
-        "get_followup_guidance",
-        "record_document_status",
-        "offer_email_summary",
-    ),
-    Phase.POST_PROCESS: (
-        "list_my_claims",
-        "select_claim",
-        "get_claim_details",
-        "get_document_guidance",
-        "get_followup_guidance",
-        "record_email_decision",
-        "offer_email_summary",
-    ),
-}
 
-
-def tool_names(state: SessionState) -> tuple[str, ...]:
-    """The tool menu for the current state. The executor re-checks it on every call."""
-    names = list(BY_PHASE[state.phase]) + list(ALWAYS)
-    if state.phase == Phase.POST_PROCESS and state.email.status != "offered":
-        names.remove("record_email_decision")
-    if state.phase == Phase.POST_PROCESS and state.email.status in ("offered", "consented", "dispatching", "sent", "queued"):
-        names.remove("offer_email_summary")  # re-offer only after a skip or a failed/blocked send
-    return tuple(names)
-
-
-def tool_schemas(state: SessionState) -> list[dict[str, Any]]:
-    return [SCHEMAS[n] for n in tool_names(state)]
+def tool_schemas(sop: Sop, state: SessionState) -> list[dict[str, Any]]:
+    """The schemas of the tools the SOP allows in this state (the menu the model sees)."""
+    return [SCHEMAS[n] for n in sop.tool_names(state)]
 
 
 # ---------------------------------------------------------------------- execution
@@ -315,6 +281,7 @@ class ToolExecutor:
         failure_ledger: Any | None,
         guard: Guard,
         caller_review: CallerReview | None,
+        sop: Sop,
     ) -> None:
         self.state = state
         self.now = now
@@ -328,6 +295,7 @@ class ToolExecutor:
         self.settings = settings
         self.failure_ledger = failure_ledger
         self.guard = guard
+        self.sop = sop
         self.caller_review = caller_review
         """This turn's guard review of the caller (None when the guard gave no verdict)."""
         self.effects = TurnEffects(caller_review=caller_review)
@@ -350,7 +318,7 @@ class ToolExecutor:
         if name not in SCHEMAS:
             tracing.event("guardrail", rule="unknown_tool", tool=name[:60])
             return ToolResult(name, False, {"error": "unknown_tool", "message": "That tool does not exist."})
-        if name not in tool_names(self.state):
+        if name not in self.sop.tool_names(self.state):
             tracing.event("guardrail", rule="tool_not_allowed_in_phase", tool=name, phase=self.state.phase.value)
             return ToolResult(name, False, {"error": "not_allowed_now", "message": self._not_allowed_message(name)})
         if not isinstance(arguments, str) or len(arguments) > MAX_ARG_CHARS:
@@ -368,6 +336,8 @@ class ToolExecutor:
             return ToolResult(name, False, {"error": "repeated_call", "message": "You already have this result. Reply to the caller now."})
         try:
             return getattr(self, f"_{name}")(args)
+        except SopViolation:
+            raise  # a transition the SOP does not allow aborts the turn; nothing from it is saved
         except Exception as exc:  # a tool failure is a result, never a crash
             tracing.event("tool_error", tool=name, error=exc.__class__.__name__)
             return ToolResult(
@@ -383,15 +353,8 @@ class ToolExecutor:
             return "There is no active email offer."
         return "That tool is not available in this step."
 
-    def _transition(self, to: Phase, reason: str) -> None:
-        if self.state.phase == to:
-            return
-        tracing.event("phase_transition", from_phase=self.state.phase.value, to_phase=to.value, reason=reason)
-        self.state.phase_log.append(
-            PhaseTransition(turn_index=self.state.turn_index, from_phase=self.state.phase, to_phase=to, reason=reason, at=self.now)
-        )
-        self.state.phase_log = self.state.phase_log[-50:]
-        self.state.phase = to
+    def _advance(self, event: str) -> None:
+        advance(self.sop, self.state, event, self.now)
 
     # ------------------------------------------------------------------ handoff
     def _require_human_offer(self, reason: str) -> None:
@@ -505,7 +468,7 @@ class ToolExecutor:
         tracing.event("verification_gate", status=outcome.status, failed_attempts=vstate.failed_attempts, reason=outcome.reason)
 
         if self.state.verified:
-            self._transition(Phase.RESOLVE_INTENT, "identity_verified")
+            self._advance("identity_verified")
             party = vstate.party_id or ""
             return ToolResult(
                 "verify_identity",
@@ -613,7 +576,7 @@ class ToolExecutor:
             )
         if self.state.case.case_id != claim.case_id:
             self.state.case = CaseSelection(case_id=claim.case_id, selected_turn=self.state.turn_index)
-        self._transition(Phase.PROCESS_CASE, "claim_selected")
+        self._advance("claim_selected")
         self.effects.fetched_case_ids.add(claim.case_id)
         return ToolResult(
             "select_claim",
@@ -662,7 +625,7 @@ class ToolExecutor:
             return
         if self.state.email.status == "offered":
             self.state.email = EmailOffer(send_count=self.state.email.send_count)
-        self._transition(Phase.PROCESS_CASE, "case_question_after_wrap_up")
+        self._advance("case_question_after_wrap_up")
 
     def _doc(self, claim: Claim, name: str) -> str | None:
         """Match the model's document name to one listed on the claim (loose, case-insensitive)."""
@@ -754,7 +717,7 @@ class ToolExecutor:
             offered_turn=self.state.turn_index,
             send_count=self.state.email.send_count,
         )
-        self._transition(Phase.POST_PROCESS, "email_summary_offered")
+        self._advance("email_summary_offered")
         self.effects.email_offered = True
         return ToolResult(
             "offer_email_summary",

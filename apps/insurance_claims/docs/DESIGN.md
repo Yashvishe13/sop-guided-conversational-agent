@@ -73,23 +73,24 @@ observability/         redaction, nested JSON traces per turn, trace reader
 and wall-clock time (`TURN_DEADLINE_S`, 150 s by default); per-call timeouts are clipped to the
 remaining time. Guard calls are not counted against the agent's call budget.
 
-## 4. Tools and their guardrails (`agent/tools.py`)
+## 4. The SOP file and the tools (`sop.toml`, `agent/sop.py`, `agent/tools.py`)
 
-Tool menu per phase (`BY_PHASE` + `ALWAYS`); the executor re-checks the menu on every call, so a
-hallucinated or out-of-phase tool returns an explanation instead of acting.
+The SOP is data: `sop.toml` defines the phase order, the tools allowed in each phase (with
+conditions such as "only while an email offer is open"), every allowed phase transition, the strict
+rules of each phase with the code that enforces each one, what is left to the model, and what is
+remembered across phases. `agent/sop.py` loads and validates it at startup (unknown phases, tools,
+conditions, or enforcement points, an unreachable phase, or an enforcement point no rule mentions
+stop the server), and the code takes its tool menus and transitions from it:
 
-| Phase | Tools |
-| --- | --- |
-| all | `request_human` |
-| VERIFY_ID | `verify_identity` |
-| RESOLVE_INTENT | `list_my_claims`, `select_claim` |
-| PROCESS_CASE | + `get_claim_details`, `get_document_guidance`, `get_followup_guidance`, `record_document_status`, `offer_email_summary` |
-| POST_PROCESS | claim tools + `record_email_decision` (only while an offer is active); `offer_email_summary` again only after a skip or a failed send |
+* `Sop.tool_names(state)` is the menu the model sees, and the executor re-checks it on every call,
+  so a hallucinated or out-of-phase tool returns an explanation instead of acting.
+* `advance(sop, state, event, now)` is the only way the phase changes. Code reports an event
+  (`identity_verified`, `claim_selected`, `email_summary_offered`, `case_question_after_wrap_up`,
+  `caller_changed`, `verification_expired`) and the SOP says where it leads; an event the SOP does
+  not allow in the current phase raises `SopViolation`, which aborts the turn without saving it.
 
-Phase changes happen only as side effects of successful tools (`verify_identity` ->
-RESOLVE_INTENT, `select_claim` -> PROCESS_CASE, `offer_email_summary` -> POST_PROCESS, any claim
-tool after the offer -> PROCESS_CASE, withdrawing an unanswered offer) or of the guard's caller
-review (a different person or someone acting for the policyholder -> VERIFY_ID).
+[`docs/SOP.md`](SOP.md) is generated from the file (`python -m insurance_claims.agent.sop`) and a
+test fails if it is stale.
 
 | Freedom | Enforced by |
 | --- | --- |

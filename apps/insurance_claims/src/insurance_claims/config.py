@@ -162,6 +162,8 @@ class Settings:
     app_root: Path = APP_ROOT
     fixtures_dir: Path = APP_ROOT / "fixtures"
     prompts_path: Path = APP_ROOT / "prompts.toml"
+    sop_path: Path = APP_ROOT / "sop.toml"
+    """The SOP definition: phase order, tools per phase, transitions (SOP_PATH)."""
     data_dir: Path = APP_ROOT / "data"
     state_encryption_key: str | None = field(default=None, repr=False)
     traces_enabled: bool = True
@@ -247,6 +249,7 @@ class Settings:
             frozen_today=frozen_today,
             fixtures_dir=_path(get("FIXTURES_DIR"), APP_ROOT / "fixtures"),
             prompts_path=_path(get("PROMPTS_PATH"), APP_ROOT / "prompts.toml"),
+            sop_path=_path(get("SOP_PATH"), APP_ROOT / "sop.toml"),
             data_dir=data_dir,
             state_encryption_key=(get("STATE_ENCRYPTION_KEY") or "").strip() or None,
             traces_enabled=_bool(get("TRACES_ENABLED"), True),
@@ -278,3 +281,5 @@ class Settings:
             raise ConfigError(f"Fixture directory not found: {self.fixtures_dir}")
         if not self.prompts_path.is_file():
             raise ConfigError(f"Prompt file not found: {self.prompts_path}")
+        if not self.sop_path.is_file():
+            raise ConfigError(f"SOP file not found: {self.sop_path}")

@@ -30,6 +30,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from insurance_claims import __version__
 from insurance_claims.agent.loop import ClaimsAgent
 from insurance_claims.agent.prompts import PromptSet, load_prompts
+from insurance_claims.agent.sop import Sop, load_sop
+from insurance_claims.agent.tools import SCHEMAS as TOOL_SCHEMAS
 from insurance_claims.claims.fixtures import FixtureBundle, load_fixtures
 from insurance_claims.config import APP_ROOT, ConfigError, Settings
 from insurance_claims.llm.base import ModelTransport
@@ -140,6 +142,7 @@ class Runtime:
         self.settings = settings
         self.fixtures: FixtureBundle = load_fixtures(settings.fixtures_dir)
         self.prompts: PromptSet = load_prompts(settings.prompts_path)
+        self.sop: Sop = load_sop(settings.sop_path, known_tools=TOOL_SCHEMAS)
         secrets_list = [s for s in (settings.openai_api_key, settings.smtp_password, settings.state_encryption_key) if s]
         tracing.configure(
             trace_dir=settings.trace_dir,
@@ -165,6 +168,7 @@ class Runtime:
             prompts=self.prompts,
             model=self.model,
             guard_model=self.guard_model,
+            sop=self.sop,
             clock=self.clock,
             failure_ledger=self.store,
         )
@@ -198,6 +202,7 @@ class Runtime:
             "quarantined_rows": len(self.fixtures.issues),
         }
         checks["prompts"] = {"version": self.prompts.version, "sha256": self.prompts.sha256[:12]}
+        checks["sop"] = {"version": self.sop.version, "sha256": self.sop.sha256[:12]}
         checks["model"] = {
             "provider": self.settings.model_provider,
             "model": self.settings.openai_model if self.settings.model_provider == "openai" else "fake",
