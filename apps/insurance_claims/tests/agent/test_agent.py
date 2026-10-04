@@ -308,3 +308,29 @@ def test_offline_demo_follows_the_readme_walkthrough(harness):
     assert h.state.email.status == "offered"
     h.act("email_send")
     assert h.state.email.status == "queued"
+
+
+def _assistant_kinds(payload):
+    return [m["kind"] for m in payload["messages"] if m["role"] == "assistant"]
+
+
+def test_email_skip_and_send_replies_are_chat_bubbles(harness):
+    skip = harness()
+    skip.say(DEMO_UTTERANCE)
+    skip.say("that's all")
+    assert _assistant_kinds(skip.act("email_skip")) == ["chat"]
+    send = harness()
+    send.say(DEMO_UTTERANCE)
+    send.say("that's all")
+    payload = send.act("email_send")
+    assert send.state.email.status == "queued" and _assistant_kinds(payload) == ["chat"]
+
+
+def test_system_events_are_notices(harness, clock):
+    h = harness()
+    h.say(DEMO_UTTERANCE)
+    h.say("that's all")
+    h.act("email_skip")
+    assert _assistant_kinds(h.act("email_send")) == ["notice"]  # the offer is no longer open
+    clock.advance(hours=1)
+    assert "notice" in _assistant_kinds(h.say("Hello again"))  # verification expired

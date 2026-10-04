@@ -67,7 +67,9 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 # ---------------------------------------------------------------------- fixed texts
-# Everything the application says by itself (not written by the model) lives here.
+# Everything the application says by itself (not written by the model) lives here. Replies to the
+# caller (greeting, fallbacks, email skip and delivery results) are shown as normal chat bubbles;
+# only system events (verification expired, a button that no longer applies) use the "notice" style.
 GREETING = (
     "Hi, thanks for contacting claims support. I can help with questions about your insurance claims. "
     "To get started, could you share your full name and two more details, such as your date of birth, "
@@ -89,7 +91,7 @@ _TURN_LIMIT = "This conversation has gotten long, so I've flagged it for a human
 _EXPIRED_NOTE_FOR_MODEL = (
     "Note from the application: the caller's verification expired after inactivity. They must verify again before any claim details."
 )
-_DELIVERY_NOTICE = {
+_DELIVERY_REPLY = {
     "sent": "Done, I've sent the summary to {masked}. Is there anything else I can help with?",
     "queued": "I've saved the summary to the local demo outbox. This demo doesn't deliver real email, so nothing was sent to your inbox. Is there anything else I can help with?",
     "failed": "I'm sorry, the email couldn't be sent and nothing was delivered. A claims representative can help if you still need a copy.",
@@ -239,7 +241,8 @@ class ClaimsAgent:
             state.handoff.offered = True
         masked = mask_email(self.directory.contact_email(state.verification.party_id or "")) if state.verified else "the address on file"
         tracing.event("email_result", status=result.status)
-        msg = self._append(state, "assistant", _DELIVERY_NOTICE[result.status].format(masked=masked), now, kind="notice")
+        # The representative's reply to the caller (a chat bubble), even though code, not the model, wrote it.
+        msg = self._append(state, "assistant", _DELIVERY_REPLY[result.status].format(masked=masked), now)
         return TurnOutcome(state=state, messages=[msg], stop_reason=f"email_{result.status}")
 
     # ------------------------------------------------------------------ expiry and email buttons
@@ -275,7 +278,7 @@ class ClaimsAgent:
         if decision == "skip":
             email.status = "skipped"
             if not messages:
-                messages = [self._append(state, "assistant", _SKIPPED, now, kind="notice")]
+                messages = [self._append(state, "assistant", _SKIPPED, now)]  # a normal reply, as if typed
             return TurnOutcome(state=state, messages=messages, stop_reason="email_skipped")
         assert email.summary is not None
         party = state.verification.party_id or ""

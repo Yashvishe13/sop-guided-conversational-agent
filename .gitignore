@@ -10,6 +10,7 @@ apps/insurance_claims/data/
 *.sqlite3
 *.sqlite3-*
 apps/insurance_claims/evals/results/raw/
+artifacts/
 
 # python
 .venv/
