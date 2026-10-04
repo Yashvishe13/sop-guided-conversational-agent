@@ -13,7 +13,6 @@ run `docker compose exec claims-agent python -m insurance_claims.agent.sop` whil
 ## Hosted demo
 
 https://98-81-151-1.sslip.io (AWS EC2, real `gpt-5.6-luna`).
-Follow the walkthrough below in the chat page.
 
 ## Run it (Docker)
 
@@ -44,25 +43,3 @@ docker run --rm -p 8000:8000 -e OPENAI_API_KEY=sk-... -v claims-data:/data insur
 
 To hand the image over as a file: `docker save insurance-claims-agent | gzip > insurance-claims-agent.tar.gz`,
 and on the other machine `docker load < insurance-claims-agent.tar.gz`, then the same `docker run`.
-
-## Walk through the full workflow
-
-The test UI is the chat page. Type the following.
-
-1. **Identity verification.** `Hi, I'm calling about my denied healthcare claim from January.`
-   The agent explains that claim details are private and asks for identity details. Then:
-   `My name is Margaret Chen, date of birth March 15, 1985, SSN last four 4472.`
-   Three matching details verify the caller (a policy number alone never counts).
-2. **Intent resolution.** The agent remembers "denied healthcare claim from January" from before
-   verification and selects claim CL-2048 without asking again (CL-2011 is also January healthcare,
-   but closed). The progress bar moves to "Review claim".
-3. **Claim processing.** It explains the denial from the record (missing pathology report and office
-   note, appeal deadline already passed) and asks whether you can get the documents. Try
-   `I can ask my doctor for both. How do I send them and how long does review take?`
-4. **Post-case follow-up.** Say `That's all, thanks.` The agent offers an email summary with Send and
-   Skip buttons; choose Send (or type "yes please"). The demo writes the email to a local outbox
-   and says so honestly; nothing is delivered.
-
-Things to try along the way: give the details over several messages or with a typo; say
-`I'm calling for my mother`; ask `What is RL?` three times; refuse verification twice; or ask
-`Is the pathology report on file?`.
