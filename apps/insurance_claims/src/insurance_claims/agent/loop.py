@@ -557,5 +557,7 @@ def _developer(text: str) -> dict[str, str]:
 
 
 def _subject(email: EmailOffer) -> str:
+    if email.summary and email.summary.subject:
+        return email.summary.subject
     cid = email.summary.case_id if email.summary else None
     return f"Summary of your claims support conversation ({cid})" if cid else "Summary of your claims support conversation"

@@ -112,6 +112,8 @@ class EmailSummary(_Model):
     case_id: str | None = None
     case_type: str | None = None
     status: str | None = None
+    subject: str | None = None
+    """Written by the agent; older checkpoints without it fall back to a fixed subject."""
     body_text: str = ""
 
 

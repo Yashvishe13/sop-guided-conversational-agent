@@ -589,3 +589,33 @@ def test_no_offer_is_required_once_a_human_was_requested(harness):
     for q in ("What is RL?", "Who won the world cup?", "What is RL, seriously?"):
         payload = h.say(q)
     assert h.last_reply(payload) == ASK_DETAILS
+
+
+# ---------------------------------------------------------------------- the email the agent writes
+
+
+@pytest.mark.parametrize(
+    ("subject", "problem"),
+    [("Your claim summary", "name claim CL-2048 in the subject"), ("Your claim CL-2048: summary", "without colons or em dashes")],
+)
+def test_email_subject_must_name_the_claim_and_avoid_colons(harness, subject, problem):
+    model = Scripted(*VERIFY_AND_LOAD, say("You're verified."))
+    h = harness(model=model, guard_model=GuardStub())
+    h.say("My name is Margaret Chen, DOB 1985-03-15, SSN last four 4472.")
+    model.responses += [call("offer_email_summary", subject=subject, summary=SUMMARY), say("One moment.")]
+    h.say("That's all.")
+    assert problem in " ".join(model.outputs()[0]["fix"])
+
+
+def test_the_agents_subject_is_used_for_the_email(harness):
+    model = Scripted(*VERIFY_AND_LOAD, say("You're verified."))
+    h = harness(model=model, guard_model=GuardStub())
+    h.say("My name is Margaret Chen, DOB 1985-03-15, SSN last four 4472.")
+    model.responses += [
+        call("offer_email_summary", subject="Your claim CL-2048, summary and next steps", summary=SUMMARY),
+        say("Shall I email it?"),
+    ]
+    h.say("That's all.")
+    h.act("email_send")
+    email = next(h.runtime.settings.outbox_dir.glob("*.eml")).read_text()
+    assert "Subject: Your claim CL-2048, summary and next steps" in email

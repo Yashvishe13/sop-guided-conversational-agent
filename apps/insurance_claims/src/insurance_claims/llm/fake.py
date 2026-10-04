@@ -163,12 +163,13 @@ class OfflineFakeModel:
                 if d is None:
                     return self._call("get_claim_details", {})
                 case = d["case"]
-                docs = " and ".join(case.get("documents_needed") or [])
-                body = f"Hello, thank you for contacting claims support about your {case['case_type']} claim {case['case_id']}. The claim is currently {case['status']}."
-                if docs:
-                    body += f" The next step is to send the {docs} through the member portal or claim upload link."
-                body += " Claims Support Team"
-                return self._call("offer_email_summary", {"summary": body})
+                return self._call(
+                    "offer_email_summary",
+                    {
+                        "subject": f"Your claim {case['case_id']}, summary and next steps",
+                        "summary": _email_body(case, ctx.get("caller_first_name") or "there", (d.get("deadline") or {}).get("status")),
+                    },
+                )
             if "offer_email_summary" in done:
                 return _msg("I've prepared a summary of our conversation. Would you like me to email it to the address on file?")
             if "record_email_decision" in tools and "record_email_decision" not in done:
@@ -246,3 +247,33 @@ def _guard_verdict(task: str, payload: dict[str, Any]) -> dict[str, Any]:
     if payload.get("required_in_reply") and not re.search(r"\b(?:human|representative|person)\b", reply, re.IGNORECASE):
         problems.append({"category": "missing_required", "detail": "does not offer a human representative"})
     return {"allowed": not problems, "problems": problems}
+
+
+def _email_body(case: dict[str, Any], first_name: str, deadline_status: str | None = None) -> str:
+    """The offline model's email, in the layout the tool description asks for."""
+    from datetime import date
+
+    def nice(iso: str) -> str:
+        d = date.fromisoformat(iso[:10])
+        return f"{d.strftime('%B')} {d.day}, {d.year}"
+
+    docs = case.get("documents_needed") or []
+    steps = "\n".join(f"{i}. Send the {doc}." for i, doc in enumerate(docs, 1)) or "There is nothing you need to send right now."
+    parts = [
+        f"Hi {first_name},",
+        "Thank you for contacting claims support today. Here is a summary of our conversation.",
+        f"Claim {case['case_id']}\nYour {case['case_type']} claim was filed on {nice(case['created_at'])} and is {case['status']}.",
+        "What we discussed\nWe went over the claim decision and what is needed next.",
+        f"Your next steps\n{steps}" + ("\nYou can upload documents through the member portal or claim upload link." if docs else ""),
+    ]
+    if case.get("appeal_deadline"):
+        when = nice(case["appeal_deadline"])
+        sentence = (
+            f"The appeal deadline was {when}, and it has passed." if deadline_status == "passed" else f"The appeal deadline is {when}."
+        )
+        parts.append(f"Important date\n{sentence}")
+    parts += [
+        "Need help\nYou can come back to this chat or ask for a claims representative at any time.",
+        "Claims Support Team\nThis summary was sent at your request to the email address on file.",
+    ]
+    return "\n\n".join(parts)

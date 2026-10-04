@@ -209,7 +209,7 @@ class Guard:
         document_status: dict[str, str],
         guidance: list[str],
         today: str,
-        caller_messages: list[str],
+        transcript: list[dict[str, str]],
     ) -> SummaryVerdict | None:
         payload = {
             "summary": summary,
@@ -217,7 +217,7 @@ class Guard:
             "document_status": document_status,
             "guidance": guidance,
             "today": today,
-            "caller_messages": caller_messages,
+            "transcript": transcript,
         }
         return self._ask("guard_summary", payload, SummaryVerdict)
 

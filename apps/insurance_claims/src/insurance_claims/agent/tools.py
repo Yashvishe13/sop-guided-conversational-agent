@@ -189,9 +189,29 @@ SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "offer_email_summary": _fn(
         "offer_email_summary",
-        "When the caller's claim has been fully covered, offer to email them a summary. Write the summary body: what was discussed, "
-        "the claim status or outcome, and the follow-up items. Plain text, no colons, no em dashes. The app shows it with Send and Skip buttons.",
-        {"summary": {"type": "string", "description": "The email body, 3 to 7 sentences, signed Claims Support Team."}},
+        "When the caller's claim has been covered or they are done, offer to email them a summary. You write the email; the app shows it "
+        "with Send and Skip buttons, and it is fact checked against the claim record and the caller's words before it is offered. "
+        "Write it like a clear, warm email from a claims representative, in plain text, with this layout, each part separated by a blank line.\n"
+        "1. Greeting with the caller's first name, for example 'Hi Margaret,'.\n"
+        "2. One sentence thanking them for contacting claims support today and saying this is a summary of the conversation.\n"
+        "3. The line 'Claim <claim ID>', then one sentence with the claim type, the date it was opened (created_at), and its status, from the claim record.\n"
+        "4. The line 'What we discussed', then 2 to 4 sentences, the outcome and its reason, and any questions you answered.\n"
+        "5. The line 'Your next steps', then a numbered list with one item per outstanding document, saying what the caller told you they will do "
+        "about it (or that it is still needed), then one or two sentences on how to send documents and how long review takes, only from guidance "
+        "you looked up (call get_followup_guidance or get_document_guidance first if you have not). If nothing is outstanding, say there is "
+        "nothing they need to send.\n"
+        "6. If the claim has an appeal deadline, the line 'Important date', then one sentence with the date and whether it has passed.\n"
+        "7. The line 'Need help', then one sentence saying they can come back to this chat or ask for a claims representative.\n"
+        "8. 'Claims Support Team' on its own line, then 'This summary was sent at your request to the email address on file.'\n"
+        "Never use the colon or em dash characters anywhere, including headings and the subject. No markdown, no bullet symbols other "
+        "than the numbered list. State only what the record, the tool results, and the caller's own words support.",
+        {
+            "subject": {
+                "type": "string",
+                "description": "Email subject, under 80 characters, naming the claim ID, for example 'Your claim CL-2048, summary and next steps'.",
+            },
+            "summary": {"type": "string", "description": "The email body in the layout above."},
+        },
     ),
     "record_email_decision": _fn(
         "record_email_decision",
@@ -699,20 +719,28 @@ class ToolExecutor:
                 problems.append(f"include the follow-up item '{doc}'")
         if check_style(summary):
             problems.append("remove every colon and em dash")
-        if len(summary) < 80 or len(summary) > 1800:
-            problems.append("write 3 to 7 sentences")
+        if len(summary) < 80 or len(summary) > 3000:
+            problems.append("follow the layout, between 80 and 3000 characters")
+        subject = " ".join(str(a.get("subject") or "").split())
+        if subject:
+            if claim.case_id not in subject:
+                problems.append(f"name claim {claim.case_id} in the subject")
+            if len(subject) > 80 or check_style(subject):
+                problems.append("keep the subject under 80 characters, without colons or em dashes")
         packet = build_case_evidence(claim, self.guidelines, self.schema_doc, today=self.today)
         if not problems:
             problems += [f"{v.code}: {v.detail}" for v in check_grounding(summary, self._summary_grounding(claim, packet))]
             problems += [f"{v.code}: {v.detail}" for v in check_internal_reference(summary)]
         if not problems:
-            problems += self._fact_check_summary(summary, claim, packet)
+            problems += self._fact_check_summary(summary, claim, packet, subject)
         if problems:
             tracing.event("guardrail", rule="email_summary_incomplete", problems=problems)
             return ToolResult("offer_email_summary", False, {"error": "summary_rejected", "fix": problems})
         self.state.email = EmailOffer(
             status="offered",
-            summary=EmailSummary(case_id=claim.case_id, case_type=claim.case_type, status=claim.status, body_text=summary),
+            summary=EmailSummary(
+                case_id=claim.case_id, case_type=claim.case_type, status=claim.status, subject=subject or None, body_text=summary
+            ),
             summary_hash=None,
             offered_turn=self.state.turn_index,
             send_count=self.state.email.send_count,
@@ -738,19 +766,22 @@ class ToolExecutor:
             case_status=claim.status,
         )
 
-    def _fact_check_summary(self, summary: str, claim: Claim, packet: EvidencePacket) -> list[str]:
+    def _fact_check_summary(self, summary: str, claim: Claim, packet: EvidencePacket, subject: str = "") -> list[str]:
         """Ask the guard whether every statement is supported by the record and the caller's own words."""
         recorded = self.state.documents.get(claim.case_id, {})
         guidance = [d.get(k) or "" for d in packet.documents for k in ("guidance", "alternative")]
         guidance += [packet.case_type_guidance or "", packet.default_guidance, packet.processing_time or "", packet.human_review_rule or ""]
         guidance += [self.guidelines.render_followup(rule, claim) for rule in self.followup_rules]
         verdict = self.guard.judge_summary(
-            summary=summary,
+            summary=f"Subject line, {subject}\n\n{summary}" if subject else summary,
             claim={**packet.case, "appeal_deadline_status": packet.deadline},
             document_status={doc: recorded.get(doc, "unknown") for doc in claim.documents_needed},
             guidance=[g for g in guidance if g],
             today=self.today.isoformat(),
-            caller_messages=self.caller_text.splitlines(),
+            transcript=[
+                {"speaker": "caller" if m.role == "user" else "representative", "text": m.text}
+                for m in self.state.messages_since_reset()[-30:]
+            ],
         )
         if verdict is None:
             return ["the summary could not be fact checked right now; try offering it again"]
