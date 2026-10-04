@@ -1,4 +1,4 @@
-# docker compose up --build   (run from the repository root)
+# docker compose up --build   (run from the repository root; PORT=8080 to use another host port)
 # Secrets are read at runtime from your shell or from ./.env and are never baked into the image.
 #   OPENAI_API_KEY        required when MODEL_PROVIDER=openai (the app refuses to start without it);
 #                         leave it empty with MODEL_PROVIDER=fake for the offline demo model.
@@ -12,7 +12,7 @@ services:
       context: apps/insurance_claims
     image: insurance-claims-agent:latest
     ports:
-      - "8000:8000"
+      - "${PORT:-8000}:8000"
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.6-luna}
