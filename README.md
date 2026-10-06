@@ -10,10 +10,6 @@ The SOP itself is defined as data in [`sop.toml`](apps/insurance_claims/sop.toml
 tools per phase, transitions, and which code enforces each rule). To read it as a table per phase,
 run `docker compose exec claims-agent python -m insurance_claims.agent.sop` while the app is running.
 
-## Hosted demo
-
-https://98-81-151-1.sslip.io (AWS EC2).
-
 ## Run it (Docker)
 
 Requires Docker with Compose and an OpenAI API key. From this directory:
